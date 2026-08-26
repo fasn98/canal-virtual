@@ -1,0 +1,18 @@
+# Volumes
+volumes/output/
+volumes/assets/
+volumes/ticker/
+
+# Arquivos gerados
+*.mp4
+*.wav
+*.mp3
+*.flv
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Docker
+*.log
+.env

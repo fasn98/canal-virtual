@@ -1,0 +1,131 @@
+networks:
+  backend:
+
+services:
+
+  redis:
+    image: redis:7
+    container_name: redis
+    restart: always
+    networks:
+      - backend
+
+  ultrafast:
+    build:
+      context: ../ultrafast
+    container_name: ultrafast
+    depends_on:
+      - redis
+    networks:
+      - backend
+
+  minio:
+    image: minio/minio
+    container_name: minio
+    command: server /data --console-address ":9001"
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ACCESS_KEY}
+      - MINIO_ROOT_PASSWORD=${MINIO_SECRET_KEY}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    restart: always
+    networks:
+      - backend
+
+  collector:
+    image: fasn/collector:latest
+    container_name: collector
+    restart: always
+    environment:
+      - REDIS_HOST=redis
+    depends_on:
+      - redis
+    networks:
+      - backend
+
+  classifier:
+    image: fasn/classifier:latest
+    container_name: classifier
+    restart: always
+    environment:
+      - REDIS_HOST=redis
+    depends_on:
+      - redis
+    networks:
+      - backend
+
+  synthesizer:
+    image: fasn/synthesizer:latest
+    container_name: synthesizer
+    restart: always
+    environment:
+      - REDIS_HOST=redis
+    depends_on:
+      - redis
+    networks:
+      - backend
+
+  commentator:
+    image: fasn/commentator:latest
+    container_name: commentator
+    restart: always
+    environment:
+      - REDIS_HOST=redis
+    depends_on:
+      - redis
+    networks:
+      - backend
+
+  presenter:
+    image: fasn/presenter:latest
+    container_name: presenter
+    restart: always
+
+    command: ["python", "main.py"]
+
+    environment:
+      - REDIS_HOST=redis
+      - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY}
+      - ELEVENLABS_VOICE_ID=${ELEVENLABS_VOICE_ID}
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY}
+      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY}
+      - MINIO_BUCKET=canal-virtual-audio
+    depends_on:
+      - redis
+      - minio
+    networks:
+      - backend
+
+  renderer:
+    image: fasn/renderer:latest
+    container_name: renderer
+    restart: always
+    environment:
+      - REDIS_HOST=redis
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY}
+      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY}
+      - MINIO_BUCKET=canal-virtual-video
+    depends_on:
+      - redis
+      - minio
+    networks:
+      - backend
+
+  streamer:
+    image: fasn/streamer:latest
+    container_name: streamer
+    restart: always
+    environment:
+      - REDIS_HOST=redis
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY}
+      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY}
+      - MINIO_BUCKET=canal-virtual-video
+    depends_on:
+      - redis
+      - minio
+    networks:
+      - backend

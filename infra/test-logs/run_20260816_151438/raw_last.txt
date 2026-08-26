@@ -1,0 +1,150 @@
+1786885885051-0
+id
+3e4682c2422b9ff8
+title
+Five killed as Russia launches fresh aerial attacks across Ukraine
+summary
+Ukrainian President Volodymyr Zelensky accuses Russia of targeting civilian infrastructure, while Moscow reports that a warehouse was hit.
+link
+https://www.bbc.co.uk/news/articles/c1411pgje8xo?at_medium=RSS&at_campaign=rss
+published
+Sun, 16 Aug 2026 10:52:08 GMT
+source
+https://feeds.bbci.co.uk/news/world/rss.xml
+timestamp
+1786885885.048056
+1786885885053-0
+id
+f7053cd9143e1bb6
+title
+Thousands displaced by deadly Indonesia earthquake as rescue efforts continue
+summary
+Hundreds of homes and public buildings have been severely damaged with at least 53 people killed.
+link
+https://www.bbc.co.uk/news/articles/c3v00w5ylw9o?at_medium=RSS&at_campaign=rss
+published
+Sun, 16 Aug 2026 12:37:21 GMT
+source
+https://feeds.bbci.co.uk/news/world/rss.xml
+timestamp
+1786885885.0528893
+1786885885054-0
+id
+2a997206ce314340
+title
+Hurricane Lala sparks flash floods in Hawaii as strong winds and rain persist
+summary
+Officials say flash flooding may have swept away homes with people in them in worst-hit areas.
+link
+https://www.bbc.co.uk/news/articles/crmrr7kjy9vo?at_medium=RSS&at_campaign=rss
+published
+Sun, 16 Aug 2026 12:53:43 GMT
+source
+https://feeds.bbci.co.uk/news/world/rss.xml
+timestamp
+1786885885.0541975
+1786885885055-0
+id
+7c190dc03eff8237
+title
+Twelve killed as Polish bus veers off Hungarian motorway
+summary
+Dozens more are seriously injured after the tourist bus overturned in the early hours of Sunday morning.
+link
+https://www.bbc.co.uk/news/articles/ckg4424zd7go?at_medium=RSS&at_campaign=rss
+published
+Sun, 16 Aug 2026 10:53:50 GMT
+source
+https://feeds.bbci.co.uk/news/world/rss.xml
+timestamp
+1786885885.0549576
+1786885885055-1
+id
+e4aa4d86d4ea496c
+title
+Europe's tallest Virgin Mary statue unveiled in rural Poland
+summary
+The 55.6-metre (182ft) concrete figure is head-and-shoulders above Rio de Jaineiro's Christ the Redeemer.
+link
+https://www.bbc.co.uk/news/articles/cn5nnlq2pwpo?at_medium=RSS&at_campaign=rss
+published
+Sun, 16 Aug 2026 11:35:25 GMT
+source
+https://feeds.bbci.co.uk/news/world/rss.xml
+timestamp
+1786885885.0556617
+1786885885056-0
+id
+be57cc06dde66fd8
+title
+Morocco detains dozens of migrants trying to cross into Ceuta, reports say
+summary
+Security had been stepped up amid suggestions on social media of a second mass crossing on Saturday.
+link
+https://www.bbc.co.uk/news/articles/ckg44x2ey1ro?at_medium=RSS&at_campaign=rss
+published
+Sat, 15 Aug 2026 20:58:31 GMT
+source
+https://feeds.bbci.co.uk/news/world/rss.xml
+timestamp
+1786885885.0563982
+1786885885057-0
+id
+ff42b9432c374fc9
+title
+Qatar denies capturing three Iranian pilots after downing fighter jets
+summary
+Iran claims they have been held since Qatar downed two fighter jets at the start of the US-Iran war.
+link
+https://www.bbc.co.uk/news/articles/cj4kk8kz271o?at_medium=RSS&at_campaign=rss
+published
+Sun, 16 Aug 2026 09:27:58 GMT
+source
+https://feeds.bbci.co.uk/news/world/rss.xml
+timestamp
+1786885885.0570707
+1786885885057-1
+id
+9451759e9926ca1f
+title
+Liechtenstein changes succession rule to allow women to ascend the throne
+summary
+The declaration was made on the national day of the central European country, which has a population of just 44,000.
+link
+https://www.bbc.co.uk/news/articles/cn9nnxrxg4qo?at_medium=RSS&at_campaign=rss
+published
+Sat, 15 Aug 2026 19:41:57 GMT
+source
+https://feeds.bbci.co.uk/news/world/rss.xml
+timestamp
+1786885885.057584
+1786885885058-0
+id
+948a30109573b9ee
+title
+Multiple suspects at large after five shot at Virginia State University, police say
+summary
+Police responded to reports of a shooting outside a residence halls at about 01:28 local time (05:28 GMT) on Saturday.
+link
+https://www.bbc.co.uk/news/articles/c0l5583903yo?at_medium=RSS&at_campaign=rss
+published
+Sat, 15 Aug 2026 19:34:22 GMT
+source
+https://feeds.bbci.co.uk/news/world/rss.xml
+timestamp
+1786885885.0580454
+1786885885059-0
+id
+9d3e8903f42afdfb
+title
+Eleven killed in Israeli strikes on southern Lebanon, authorities say
+summary
+Israel's military said it had struck "Hezbollah terror infrastructure" in response to what it described as earlier action against its soldiers.
+link
+https://www.bbc.co.uk/news/articles/c4gjygx4gjeo?at_medium=RSS&at_campaign=rss
+published
+Sat, 15 Aug 2026 20:21:14 GMT
+source
+https://feeds.bbci.co.uk/news/world/rss.xml
+timestamp
+1786885885.0586958

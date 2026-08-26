@@ -1,0 +1,10 @@
+CONTAINER ID   IMAGE                     COMMAND                  CREATED         STATUS                          PORTS                                                             NAMES
+545e659397c6   fasn/synthesizer:latest   "python -u main.py"      3 minutes ago   Up 3 minutes                                                                                      synthesizer
+9f4e674c9019   fasn/collector:latest     "python -u main.py"      3 minutes ago   Up 3 minutes                                                                                      collector
+005d1af06c0f   fasn/commentator:latest   "python -u main.py"      3 minutes ago   Up 3 minutes                                                                                      commentator
+301d8f984254   fasn/classifier:latest    "python -u main.py"      3 minutes ago   Up 3 minutes                                                                                      classifier
+2bb53a62b4cb   fasn/renderer:latest      "python main.py"         3 minutes ago   Up 3 minutes                                                                                      renderer
+4f9bd9c4374e   fasn/presenter:latest     "python main.py"         3 minutes ago   Restarting (1) 24 seconds ago                                                                     presenter
+15e81132ffab   fasn/streamer:latest      "python main.py"         3 minutes ago   Up 3 minutes                                                                                      streamer
+db36fdcd5b11   redis:7                   "docker-entrypoint.s…"   3 minutes ago   Up 3 minutes                    6379/tcp                                                          redis
+5836dae7995c   minio/minio               "/usr/bin/docker-ent…"   3 minutes ago   Up 3 minutes                    0.0.0.0:9000-9001->9000-9001/tcp, [::]:9000-9001->9000-9001/tcp   minio

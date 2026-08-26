@@ -1,0 +1,106 @@
+services:
+  redis:
+    image: redis:7
+    container_name: redis
+    restart: always
+    networks:
+      - canalnet
+
+  collector:
+    build: ./collector
+    container_name: collector
+    restart: always
+    networks:
+      - canalnet
+    environment:
+      - PYTHONUNBUFFERED=1
+    depends_on:
+      - redis
+
+  classifier:
+    build: ./classifier
+    container_name: classifier
+    restart: always
+    networks:
+      - canalnet
+    environment:
+      - PYTHONUNBUFFERED=1
+    depends_on:
+      - redis
+      - collector
+
+  commentator:
+    build: ./commentator
+    container_name: commentator
+    restart: always
+    networks:
+      - canalnet
+    environment:
+      - PYTHONUNBUFFERED=1
+    depends_on:
+      - redis
+      - classifier
+
+  synthesizer:
+    build: ./synthesizer
+    container_name: synthesizer
+    restart: always
+    networks:
+      - canalnet
+    depends_on:
+      - redis
+      - commentator
+
+  presenter:
+    build: ./presenter
+    container_name: presenter
+    restart: always
+    networks:
+      - canalnet
+    environment:
+      - PYTHONUNBUFFERED=1
+    depends_on:
+      - synthesizer
+      - redis
+
+  renderer:
+    build: ./renderer
+    container_name: renderer
+    restart: always
+    networks:
+      - canalnet
+    environment:
+      - PYTHONUNBUFFERED=1
+    depends_on:
+      - presenter
+      - redis
+    volumes:
+      - ./volumes/assets:/app/assets
+      - ./volumes/output:/app/output
+      - ./volumes/ticker:/app/ticker
+
+  streamer:
+    build: ./streamer
+    container_name: streamer
+    restart: always
+    networks:
+      - canalnet
+    depends_on:
+      - renderer
+    volumes:
+      - ./volumes/output:/app/output
+      - ./volumes/assets:/app/assets
+
+  orchestrator:
+    build: ./orchestrator
+    container_name: orchestrator
+    restart: always
+    networks:
+      - canalnet
+    depends_on:
+      - redis
+      - streamer
+
+networks:
+  canalnet:
+    driver: bridge

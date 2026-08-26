@@ -1,0 +1,150 @@
+1786885885056-0
+id
+3e4682c2422b9ff8
+title
+Five killed as Russia launches fresh aerial attacks across Ukraine
+category
+Politics
+script
+ABERTURA: Five killed as Russia launches fresh aerial attacks across Ukraine
+CONTEXTO: Ukrainian President Volodymyr Zelensky accuses Russia of targeting civilian infrastructure, while Moscow reports that a warehouse was hit.
+DETALHES: Esta notícia envolve decisões de governo, disputas de poder e impactos políticos diretos.
+IMPACTO: As consequências podem afetar políticas públicas, relações internacionais e a percepção da população.
+FECHAMENTO: Seguiremos acompanhando os próximos desdobramentos e trazendo atualizações assim que surgirem.
+timestamp
+1786885885.0565655
+1786885885060-0
+id
+f7053cd9143e1bb6
+title
+Thousands displaced by deadly Indonesia earthquake as rescue efforts continue
+category
+World
+script
+ABERTURA: Thousands displaced by deadly Indonesia earthquake as rescue efforts continue
+CONTEXTO: Hundreds of homes and public buildings have been severely damaged with at least 53 people killed.
+DETALHES: Esta notícia se insere no cenário internacional, com desdobramentos em diferentes regiões do mundo.
+IMPACTO: Os efeitos podem ser amplos, afetando política, economia e relações entre países.
+FECHAMENTO: Seguiremos acompanhando os próximos desdobramentos e trazendo atualizações assim que surgirem.
+timestamp
+1786885885.0594137
+1786885885060-1
+id
+2a997206ce314340
+title
+Hurricane Lala sparks flash floods in Hawaii as strong winds and rain persist
+category
+Technology
+script
+ABERTURA: Hurricane Lala sparks flash floods in Hawaii as strong winds and rain persist
+CONTEXTO: Officials say flash flooding may have swept away homes with people in them in worst-hit areas.
+DETALHES: Esta notícia se insere no cenário internacional, com desdobramentos em diferentes regiões do mundo.
+IMPACTO: Os efeitos podem ser amplos, afetando política, economia e relações entre países.
+FECHAMENTO: Seguiremos acompanhando os próximos desdobramentos e trazendo atualizações assim que surgirem.
+timestamp
+1786885885.060559
+1786885885062-0
+id
+7c190dc03eff8237
+title
+Twelve killed as Polish bus veers off Hungarian motorway
+category
+World
+script
+ABERTURA: Twelve killed as Polish bus veers off Hungarian motorway
+CONTEXTO: Dozens more are seriously injured after the tourist bus overturned in the early hours of Sunday morning.
+DETALHES: Esta notícia se insere no cenário internacional, com desdobramentos em diferentes regiões do mundo.
+IMPACTO: Os efeitos podem ser amplos, afetando política, economia e relações entre países.
+FECHAMENTO: Seguiremos acompanhando os próximos desdobramentos e trazendo atualizações assim que surgirem.
+timestamp
+1786885885.0620513
+1786885885064-0
+id
+e4aa4d86d4ea496c
+title
+Europe's tallest Virgin Mary statue unveiled in rural Poland
+category
+Technology
+script
+ABERTURA: Europe's tallest Virgin Mary statue unveiled in rural Poland
+CONTEXTO: The 55.6-metre (182ft) concrete figure is head-and-shoulders above Rio de Jaineiro's Christ the Redeemer.
+DETALHES: Esta notícia se insere no cenário internacional, com desdobramentos em diferentes regiões do mundo.
+IMPACTO: Os efeitos podem ser amplos, afetando política, economia e relações entre países.
+FECHAMENTO: Seguiremos acompanhando os próximos desdobramentos e trazendo atualizações assim que surgirem.
+timestamp
+1786885885.0631828
+1786885885065-0
+id
+be57cc06dde66fd8
+title
+Morocco detains dozens of migrants trying to cross into Ceuta, reports say
+category
+Technology
+script
+ABERTURA: Morocco detains dozens of migrants trying to cross into Ceuta, reports say
+CONTEXTO: Security had been stepped up amid suggestions on social media of a second mass crossing on Saturday.
+DETALHES: Esta notícia se insere no cenário internacional, com desdobramentos em diferentes regiões do mundo.
+IMPACTO: Os efeitos podem ser amplos, afetando política, economia e relações entre países.
+FECHAMENTO: Seguiremos acompanhando os próximos desdobramentos e trazendo atualizações assim que surgirem.
+timestamp
+1786885885.0644393
+1786885885067-0
+id
+ff42b9432c374fc9
+title
+Qatar denies capturing three Iranian pilots after downing fighter jets
+category
+Technology
+script
+ABERTURA: Qatar denies capturing three Iranian pilots after downing fighter jets
+CONTEXTO: Iran claims they have been held since Qatar downed two fighter jets at the start of the US-Iran war.
+DETALHES: Esta notícia se insere no cenário internacional, com desdobramentos em diferentes regiões do mundo.
+IMPACTO: Os efeitos podem ser amplos, afetando política, economia e relações entre países.
+FECHAMENTO: Seguiremos acompanhando os próximos desdobramentos e trazendo atualizações assim que surgirem.
+timestamp
+1786885885.066955
+1786885885070-0
+id
+9451759e9926ca1f
+title
+Liechtenstein changes succession rule to allow women to ascend the throne
+category
+World
+script
+ABERTURA: Liechtenstein changes succession rule to allow women to ascend the throne
+CONTEXTO: The declaration was made on the national day of the central European country, which has a population of just 44,000.
+DETALHES: Esta notícia se insere no cenário internacional, com desdobramentos em diferentes regiões do mundo.
+IMPACTO: Os efeitos podem ser amplos, afetando política, economia e relações entre países.
+FECHAMENTO: Seguiremos acompanhando os próximos desdobramentos e trazendo atualizações assim que surgirem.
+timestamp
+1786885885.068698
+1786885885071-0
+id
+948a30109573b9ee
+title
+Multiple suspects at large after five shot at Virginia State University, police say
+category
+Security
+script
+ABERTURA: Multiple suspects at large after five shot at Virginia State University, police say
+CONTEXTO: Police responded to reports of a shooting outside a residence halls at about 01:28 local time (05:28 GMT) on Saturday.
+DETALHES: Trata-se de um episódio ligado à segurança pública, violência ou conflito armado.
+IMPACTO: Eventos desse tipo geram preocupação social e podem levar a mudanças em políticas de segurança.
+FECHAMENTO: Seguiremos acompanhando os próximos desdobramentos e trazendo atualizações assim que surgirem.
+timestamp
+1786885885.0706713
+1786885885072-0
+id
+9d3e8903f42afdfb
+title
+Eleven killed in Israeli strikes on southern Lebanon, authorities say
+category
+Security
+script
+ABERTURA: Eleven killed in Israeli strikes on southern Lebanon, authorities say
+CONTEXTO: Israel's military said it had struck "Hezbollah terror infrastructure" in response to what it described as earlier action against its soldiers.
+DETALHES: Trata-se de um episódio ligado à segurança pública, violência ou conflito armado.
+IMPACTO: Eventos desse tipo geram preocupação social e podem levar a mudanças em políticas de segurança.
+FECHAMENTO: Seguiremos acompanhando os próximos desdobramentos e trazendo atualizações assim que surgirem.
+timestamp
+1786885885.0721223

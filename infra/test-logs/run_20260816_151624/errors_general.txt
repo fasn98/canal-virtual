@@ -1,0 +1,9 @@
+./test-logs/run_20260816_151624/synthesizer.log:Synthesizer ERROR: Timeout reading from socket
+./test-logs/run_20260816_151624/synthesizer.log:Synthesizer ERROR: Timeout reading from socket
+./test-logs/run_20260816_151624/synthesizer.log:Synthesizer ERROR: Timeout reading from socket
+./test-logs/run_20260816_151624/classifier.log:Classifier ERROR: Timeout reading from socket
+./test-logs/run_20260816_151624/classifier.log:Classifier ERROR: Timeout reading from socket
+./test-logs/run_20260816_151624/classifier.log:Classifier ERROR: Timeout reading from socket
+./test-logs/run_20260816_151624/commentator.log:Commentator ERROR: Timeout reading from socket
+./test-logs/run_20260816_151624/commentator.log:Commentator ERROR: Timeout reading from socket
+./test-logs/run_20260816_151624/commentator.log:Commentator ERROR: Timeout reading from socket

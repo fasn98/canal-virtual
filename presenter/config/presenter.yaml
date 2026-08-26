@@ -1,0 +1,9 @@
+audio:
+  voice: "dummy"
+  format: "wav"
+
+paths:
+  output: "/app/playlist"
+
+logging:
+  level: "INFO"

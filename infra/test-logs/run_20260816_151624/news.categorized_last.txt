@@ -1,0 +1,377 @@
+1786885885053-0
+id
+3e4682c2422b9ff8
+title
+Five killed as Russia launches fresh aerial attacks across Ukraine
+summary
+Ukrainian President Volodymyr Zelensky accuses Russia of targeting civilian infrastructure, while Moscow reports that a warehouse was hit.
+category
+Politics
+score
+0.1
+timestamp
+1786885885.0528514
+1786885885056-0
+id
+f7053cd9143e1bb6
+title
+Thousands displaced by deadly Indonesia earthquake as rescue efforts continue
+summary
+Hundreds of homes and public buildings have been severely damaged with at least 53 people killed.
+category
+World
+score
+0.1
+timestamp
+1786885885.0558388
+1786885885057-0
+id
+2a997206ce314340
+title
+Hurricane Lala sparks flash floods in Hawaii as strong winds and rain persist
+summary
+Officials say flash flooding may have swept away homes with people in them in worst-hit areas.
+category
+Technology
+score
+0.12
+timestamp
+1786885885.0568697
+1786885885059-0
+id
+7c190dc03eff8237
+title
+Twelve killed as Polish bus veers off Hungarian motorway
+summary
+Dozens more are seriously injured after the tourist bus overturned in the early hours of Sunday morning.
+category
+World
+score
+0.1
+timestamp
+1786885885.0588403
+1786885885060-0
+id
+e4aa4d86d4ea496c
+title
+Europe's tallest Virgin Mary statue unveiled in rural Poland
+summary
+The 55.6-metre (182ft) concrete figure is head-and-shoulders above Rio de Jaineiro's Christ the Redeemer.
+category
+Technology
+score
+0.12
+timestamp
+1786885885.059852
+1786885885061-0
+id
+be57cc06dde66fd8
+title
+Morocco detains dozens of migrants trying to cross into Ceuta, reports say
+summary
+Security had been stepped up amid suggestions on social media of a second mass crossing on Saturday.
+category
+Technology
+score
+0.12
+timestamp
+1786885885.0609138
+1786885885061-1
+id
+ff42b9432c374fc9
+title
+Qatar denies capturing three Iranian pilots after downing fighter jets
+summary
+Iran claims they have been held since Qatar downed two fighter jets at the start of the US-Iran war.
+category
+Technology
+score
+0.12
+timestamp
+1786885885.0614982
+1786885885062-0
+id
+9451759e9926ca1f
+title
+Liechtenstein changes succession rule to allow women to ascend the throne
+summary
+The declaration was made on the national day of the central European country, which has a population of just 44,000.
+category
+World
+score
+0.1
+timestamp
+1786885885.061842
+1786885885064-0
+id
+948a30109573b9ee
+title
+Multiple suspects at large after five shot at Virginia State University, police say
+summary
+Police responded to reports of a shooting outside a residence halls at about 01:28 local time (05:28 GMT) on Saturday.
+category
+Security
+score
+0.29
+timestamp
+1786885885.0638993
+1786885885065-0
+id
+9d3e8903f42afdfb
+title
+Eleven killed in Israeli strikes on southern Lebanon, authorities say
+summary
+Israel's military said it had struck "Hezbollah terror infrastructure" in response to what it described as earlier action against its soldiers.
+category
+Security
+score
+0.29
+timestamp
+1786885885.0650887
+1786885885066-0
+id
+1c05e3e80e4cd7fb
+title
+Australian state to launch gun buyback after Bondi Beach attack
+summary
+New South Wales, where the attack took place, will offer gun owners cash to give up their firearms.
+category
+Security
+score
+0.14
+timestamp
+1786885885.0656753
+1786885885068-0
+id
+6b6e98cecd91161f
+title
+Family stranded at sea for 16 hours after jet ski capsized in Thailand
+summary
+A father and his two young sons spent a night adrift before being rescued off the coast of the island of Koh Samui.
+category
+Technology
+score
+0.12
+timestamp
+1786885885.0678732
+1786885885068-1
+id
+c21e0f5bdf4b7822
+title
+BBC seeks to subpoena family members in Panorama lawsuit
+summary
+A spokesperson for Trump's legal team responded to the request accusing the broadcaster of "seeking to harass" the president's family.
+category
+Politics
+score
+0.2
+timestamp
+1786885885.0682967
+1786885885070-0
+id
+82dc4f7633cba7a1
+title
+Firefighters battle wildfire tearing through Belgian nature reserve
+summary
+The fire burning through the major park was described as the country's worst in recent years.
+category
+Climate
+score
+0.14
+timestamp
+1786885885.069909
+1786885885072-0
+id
+edc71185679e7c3b
+title
+South Korea proposes talks to officially end war with North
+summary
+Lee Jae Myung offers chance to end the conflict, which has been frozen since an armistice in 1953.
+category
+World
+score
+0.1
+timestamp
+1786885885.0724354
+1786885885074-0
+id
+b90370ece543ec18
+title
+France's top court blocks social media ban for under-15s
+summary
+The Constitutional Council says it infringes upon freedom of expression - but President Macron vows to prepare a new draft.
+category
+Politics
+score
+0.2
+timestamp
+1786885885.073805
+1786885885076-0
+id
+310b0eeed5f181d9
+title
+US aircraft carrier on way to relieve USS Lincoln after issues reported aboard
+summary
+Thousands of sailors on the Lincoln have reportedly faced food shortages and broken plumbing, with some considering jumping overboard.
+category
+Technology
+score
+0.12
+timestamp
+1786885885.0758185
+1786885885077-0
+id
+f908bd9b2e1c322d
+title
+Many Canadians are boycotting the US, so this is where they're travelling instead
+summary
+From exploring their own backyard to travelling abroad, many Canadians are spending their money elsewhere to send a message to the US president.
+category
+Politics
+score
+0.1
+timestamp
+1786885885.0769615
+1786885885080-0
+id
+46876392796d82ea
+title
+Five years after the Taliban swept to power, does the West have any influence?
+summary
+Five years after the Taliban swept to power, many are asking whether the West has any bargaining chips left
+category
+Technology
+score
+0.12
+timestamp
+1786885885.0799081
+1786885885082-0
+id
+6b6bddfcae043476
+title
+Secondhand book sales are booming. Is it because of AI?
+summary
+Booksellers are reporting mysterious bulk orders. It's thought the books are being used to train AI - and ending up pulped.
+category
+Technology
+score
+0.12
+timestamp
+1786885885.0816996
+1786885885082-1
+id
+0fb8d456988e56e7
+title
+'I shot Mr Thompson'- What it was like inside court as Mangione pleaded guilty
+summary
+It marked the first time a court had heard Mangione describe how he committed a crime that garnered worldwide attention.
+category
+Security
+score
+0.14
+timestamp
+1786885885.08237
+1786885885083-0
+id
+7bc1109714c5525d
+title
+Europe's scorched landscapes seen from space after summer heatwaves
+summary
+From glaciers shrinking to an exposed shipwreck,  satellites capture the impact of extreme heat and drought.
+category
+Climate
+score
+0.29
+timestamp
+1786885885.0830984
+1786885885083-1
+id
+cb5a08d5a3c7799f
+title
+The Polygamist's author says women see themselves reflected in her Netflix hit
+summary
+Zimbabwean novelist Sue Nyathi self-funded her debut novel and now asks who can afford to write at all.
+category
+Entertainment
+score
+0.14
+timestamp
+1786885885.0835998
+1786885885084-0
+id
+8f8856e4f67873c8
+title
+I wish I had been a more rebellious teenager, says Bella Ramsey
+summary
+Ramsey stars in a new film about a cancer survivor who attends “chemo camp” and finds friendship, love and freedom.
+category
+Entertainment
+score
+0.14
+timestamp
+1786885885.0841777
+1786885885086-0
+id
+206727c775a25253
+title
+BBC visits smouldering Kyiv market after Russian strikes
+summary
+Six people were injured in the strike on the market selling second-hand records, posters, toys and tools.
+category
+Economy
+score
+0.12
+timestamp
+1786885885.086216
+1786885885087-0
+id
+7d4c773588c9a2fa
+title
+Why is Australia's mushroom killer back in court this week?
+summary
+The BBC’s Katy Watson explains why triple-murder Erin Patterson is back in court this week trying to overturn her conviction.
+category
+Technology
+score
+0.12
+timestamp
+1786885885.0868542
+1786885885087-1
+id
+60d7ecd2a5f33527
+title
+World's Ugliest Dog contest crowns 2026 winner
+summary
+The annual contest has been taking place in Santa Rosa, California.
+category
+World
+score
+0.1
+timestamp
+1786885885.0873687
+1786885885089-0
+id
+425a158cb8b45e24
+title
+Moment family rescued after 16 hours floating on jet ski off Thailand
+summary
+A 50-year-old father and his two sons were found floating off Koh Samui island, a local official told AFP on Saturday.
+category
+Technology
+score
+0.12
+timestamp
+1786885885.088935
+1786885885090-0
+id
+40929892f8981ced
+title
+How is parkour helping these seniors avoid injuries?
+summary
+In one of the world's fastest aging countries, older people are finding creative ways to stay healthy.
+category
+Health
+score
+0.14
+timestamp
+1786885885.0900965
