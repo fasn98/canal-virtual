@@ -25,6 +25,16 @@ services:
       - canalnet
     environment:
       - PYTHONUNBUFFERED=1
+      # Tradução automática do título (DeepL) logo no início do pipeline.
+      - DEEPL_API_KEY=${DEEPL_API_KEY:-}
+      # Idioma-alvo do canal (formato de código da DeepL). Pode ser diferente
+      # por instância/canal no futuro.
+      - TARGET_LANGUAGE=${TARGET_LANGUAGE:-PT-BR}
+      - DEEPL_TIMEOUT_SEC=${DEEPL_TIMEOUT_SEC:-10}
+      # Recuperação automática de mensagens travadas no consumer group.
+      - STUCK_MESSAGE_TIMEOUT_MS=${STUCK_MESSAGE_TIMEOUT_MS:-60000}
+      - MAX_DELIVERY_ATTEMPTS=${MAX_DELIVERY_ATTEMPTS:-3}
+      - STUCK_SCAN_INTERVAL_SEC=${STUCK_SCAN_INTERVAL_SEC:-30}
     depends_on:
       - redis
       - collector
@@ -37,6 +47,9 @@ services:
       - canalnet
     environment:
       - PYTHONUNBUFFERED=1
+      - STUCK_MESSAGE_TIMEOUT_MS=${STUCK_MESSAGE_TIMEOUT_MS:-60000}
+      - MAX_DELIVERY_ATTEMPTS=${MAX_DELIVERY_ATTEMPTS:-3}
+      - STUCK_SCAN_INTERVAL_SEC=${STUCK_SCAN_INTERVAL_SEC:-30}
     depends_on:
       - redis
       - classifier
@@ -47,21 +60,18 @@ services:
     restart: always
     networks:
       - canalnet
+    environment:
+      - PYTHONUNBUFFERED=1
+      - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY}
+      - ELEVENLABS_VOICE_ID=${ELEVENLABS_VOICE_ID}
+      - STUCK_MESSAGE_TIMEOUT_MS=${STUCK_MESSAGE_TIMEOUT_MS:-60000}
+      - MAX_DELIVERY_ATTEMPTS=${MAX_DELIVERY_ATTEMPTS:-3}
+      - STUCK_SCAN_INTERVAL_SEC=${STUCK_SCAN_INTERVAL_SEC:-30}
     depends_on:
       - redis
       - commentator
-
-  presenter:
-    build: ./presenter
-    container_name: presenter
-    restart: always
-    networks:
-      - canalnet
-    environment:
-      - PYTHONUNBUFFERED=1
-    depends_on:
-      - synthesizer
-      - redis
+    volumes:
+      - ./volumes/assets:/app/assets
 
   renderer:
     build: ./renderer
@@ -71,8 +81,11 @@ services:
       - canalnet
     environment:
       - PYTHONUNBUFFERED=1
+      - STUCK_MESSAGE_TIMEOUT_MS=${STUCK_MESSAGE_TIMEOUT_MS:-60000}
+      - MAX_DELIVERY_ATTEMPTS=${MAX_DELIVERY_ATTEMPTS:-3}
+      - STUCK_SCAN_INTERVAL_SEC=${STUCK_SCAN_INTERVAL_SEC:-30}
     depends_on:
-      - presenter
+      - synthesizer
       - redis
     volumes:
       - ./volumes/assets:/app/assets
@@ -85,21 +98,17 @@ services:
     restart: always
     networks:
       - canalnet
+    environment:
+      - RTMP_URL=${RTMP_URL}
+      # Mix de áudio: música de fundo em 15% do volume original por padrão.
+      - MUSIC_VOLUME=${MUSIC_VOLUME:-0.15}
+      # Boost da voz da narradora (TTS ElevenLabs), que sai muito abaixo do nível de fala.
+      - VOICE_VOLUME=${VOICE_VOLUME:-5.0}
     depends_on:
       - renderer
     volumes:
       - ./volumes/output:/app/output
       - ./volumes/assets:/app/assets
-
-  orchestrator:
-    build: ./orchestrator
-    container_name: orchestrator
-    restart: always
-    networks:
-      - canalnet
-    depends_on:
-      - redis
-      - streamer
 
 networks:
   canalnet:

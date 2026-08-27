@@ -1,0 +1,13 @@
+Quero remover o fundo da foto da apresentadora (assets/avatar.png), deixando só a pessoa recortada com transparência (canal alpha), pra ela se integrar melhor visualmente na composição do estúdio 3D em vez de aparecer como um retângulo opaco flutuando por cima do cenário.
+
+1. Instale a biblioteca rembg (pip install rembg --break-system-packages), que faz remoção de fundo com um modelo de segmentação pré-treinado, sem precisar eu fazer manualmente. Se rembg não funcionar bem ou tiver algum problema de instalação, pode tentar uma alternativa equivalente (ex: usar um modelo via onnxruntime diretamente, ou outra biblioteca de remoção de fundo que você conheça) — me avise qual caminho seguiu.
+
+2. Rode a remoção de fundo em assets/avatar.png, salvando o resultado como assets/avatar_transparent.png (PNG com canal alpha). NÃO sobrescreva o avatar.png original — quero poder comparar/reverter se precisar.
+
+3. Copie o resultado também pra volumes/assets/avatar_transparent.png (lembre que essa é a pasta que os containers realmente montam).
+
+4. Gere um preview visual do recorte sozinho (só a pessoa com fundo xadrez ou fundo sólido de cor contrastante, tipo um "preview de transparência" comum em editores de imagem) salvo como preview_avatar_transparente.png, pra eu conferir a qualidade do recorte antes de integrar no vídeo — às vezes esses modelos deixam bordas serrilhadas ou cortam pedaço do cabelo/ombro, quero ver isso antes de prosseguir.
+
+5. NÃO mexa no renderer/main.py nem gere preview do vídeo completo ainda — esse passo é só sobre a qualidade do recorte da imagem em si. Eu confirmo a qualidade do recorte primeiro, e só depois pedimos o próximo passo (integrar no vídeo de teste).
+
+6. Me avise quando o preview_avatar_transparente.png estiver pronto e onde está, pra eu baixar e mostrar pro Claude no chat.

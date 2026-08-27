@@ -1,0 +1,19 @@
+Quero trocar a imagem de fundo do estúdio usada pelo renderer. Tenho uma imagem nova, mais bonita e em resolução mais alta, já enviada pra /opt/canal-virtual/assets/studio_bg_novo.png e /opt/canal-virtual/volumes/assets/studio_bg_novo.png (essa segunda pasta é a que o container realmente monta e enxerga).
+
+Contexto: hoje o renderer/main.py usa BACKGROUND_IMG = f"{ASSETS_DIR}/studio_bg.jpg" (uma imagem quadrada 512x512 de baixa resolução). A nova imagem (studio_bg_novo.png) é 1672x941, ou seja, já bem próxima de 16:9 — muito menos corte necessário que a anterior.
+
+Quero que você:
+
+1. Confirme que o arquivo existe e está íntegro em /app/assets/studio_bg_novo.png de dentro do container renderer (docker exec renderer ls -la /app/assets/studio_bg_novo.png), antes de mexer no código.
+
+2. Atualize BACKGROUND_IMG em renderer/main.py para apontar pra essa nova imagem. NÃO apague nem sobrescreva o studio_bg.jpg antigo — deixa ele no lugar como fallback/histórico, só trocamos qual está sendo referenciado.
+
+3. Revise se o filtro de scale+crop atual ("[0:v]scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,setsar=1[bg]") ainda é o mais adequado pra essa nova proporção quase-16:9, ou se algum ajuste fino (ex: usar force_original_aspect_ratio=decrease + pad em vez de crop, já que agora sobra muito menos imagem "extra" pra cortar) daria um resultado melhor. Use seu julgamento.
+
+4. A cena nova mostra um conjunto de poltronas ao redor de um mapa-múndi digital, sem mesa de apresentador — diferente da composição anterior (que tinha uma mesa). A posição atual do avatar (overlay em x=825,y=400, tamanho 270x378) foi calibrada pra a composição antiga. Ajuste a posição/tamanho do avatar pra ficar visualmente coerente com essa nova cena (por exemplo, sentado numa das poltronas centrais, ou de pé numa posição que faça sentido no espaço vazio central da imagem). Não tenho certeza de qual posição vai ficar melhor — pode testar mais de uma se achar necessário.
+
+5. Depois de ajustar, gere um frame de preview: rode o comando ffmpeg completo (com os 5 inputs: background novo, avatar, logo, lowerthird, ticker + um áudio de teste de uns 5 segundos, pode gerar um com ffmpeg -f lavfi -i "sine=frequency=440:duration=5") pra um arquivo de teste, depois extraia um frame do meio desse vídeo pra um PNG (ex: /opt/canal-virtual/preview_novo_fundo.png) usando ffmpeg -ss 2 -i teste.mp4 -vframes 1 preview_novo_fundo.png.
+
+6. NÃO suba isso pra produção ainda — não faça build/restart do container renderer de verdade até eu confirmar visualmente que a composição ficou boa. Isso é só um teste local dentro do container ou numa pasta temporária.
+
+7. Me avise que o preview_novo_fundo.png está pronto e onde ele está, pra eu baixar e mostrar pro Claude (no chat) antes de aprovarmos e irmos pra produção.

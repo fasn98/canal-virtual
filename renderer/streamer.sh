@@ -2,7 +2,11 @@
 
 INPUT="/opt/canal-virtual/volumes/output/final.mp4"
 AUDIO="/opt/canal-virtual/volumes/assets/news_audio.wav"
-RTMP_URL="rtmps://a.rtmp.youtube.com/live2/63wy-4fez-j9c0-j0fp-fek6"
+
+if [ -z "$RTMP_URL" ]; then
+  echo "ERRO: variável de ambiente RTMP_URL não definida. Abortando."
+  exit 1
+fi
 
 ffmpeg -re \
   -i "$INPUT" \

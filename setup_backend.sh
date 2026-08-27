@@ -13,7 +13,6 @@ SERVICES=(
   "classifier"
   "synthesizer"
   "commentator"
-  "presenter"
   "renderer"
   "streamer"
 )

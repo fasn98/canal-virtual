@@ -16,3 +16,11 @@ __pycache__/
 # Docker
 *.log
 .env
+.env.save
+
+# Segredos / backups locais
+*.save
+
+# Arquivos temporários / previews
+canal-virtual.zip
+preview_*.png

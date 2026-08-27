@@ -1,0 +1,15 @@
+O canal está no ar há mais de 10 horas e funcionando bem, mas a música de fundo está muito alta e abafando a voz da narradora (TTS via ElevenLabs), que está com volume baixo demais em comparação.
+
+O mix de áudio acontece no streamer/streamer.sh, no filtro amix que combina [0:a] (a voz real, vem do vídeo final.mp4 gerado pelo renderer) com [1:a] (assets/musica_classica.mp3).
+
+Quero que você:
+
+1. Em vez de confiar no parâmetro "weights" do amix (que pode não estar sendo interpretado de forma confiável), aplique um filtro "volume" explícito na música ANTES da mixagem, assim: [1:a]volume=<MUSIC_VOLUME>[music_low]; depois mixe [0:a][music_low]amix=inputs=2:duration=shortest:dropout_transition=3[aout]. Isso deixa o controle de volume explícito e fácil de eu ajustar depois.
+
+2. Torne o valor configurável via variável de ambiente MUSIC_VOLUME (padrão 0.15, ou seja, música em 15% do volume original) e passe essa env var pro container streamer no docker-compose.yml, com valor default de 0.15 caso eu não defina no .env.
+
+3. Se achar que a voz em si também está saindo baixa (não só relativamente à música, mas em termos absolutos), pode aplicar um leve boost nela também, tipo [0:a]volume=1.2[voice_boosted], mas só faça isso se, ao medir com ffmpeg -af volumedetect no áudio atual do final.mp4, o volume médio da voz estiver visivelmente abaixo do normal para fala (referência: em torno de -20dB de mean_volume costuma ser um nível de fala audível confortável; se estiver bem mais baixo que isso, tipo -30dB ou pior, considere o boost).
+
+4. Depois de aplicar, rebuilda e reinicie o streamer, e me mostre uma comparação objetiva: rode ffmpeg -af volumedetect tanto na música isolada quanto no resultado final mixado, mean_volume e max_volume de cada, pra eu confirmar numericamente que a música baixou e a voz continua audível — não preciso só "parecer melhor", quero o número.
+
+5. Não precisa me perguntar a cada passo pequeno, mas antes de decidir o valor final do MUSIC_VOLUME, se quiser testar mais de um valor (por exemplo 0.15 vs 0.10) e comparar, sinta-se à vontade — só me diga qual você escolheu e por quê.
