@@ -34,7 +34,9 @@ os.makedirs(TICKER_DIR, exist_ok=True)
 # studio_bg_novo.png: cena nova (poltronas + mapa-múndi), 1672x941 ~16:9, alta resolução.
 # Os fundos antigos (background.png / studio_bg.jpg) ficam em assets/ como fallback/histórico.
 BACKGROUND_IMG = f"{ASSETS_DIR}/studio_bg_novo.png"
-AVATAR_IMG = f"{ASSETS_DIR}/avatar.png"
+# Recorte transparente da apresentadora (sem o retângulo de fundo opaco).
+# O avatar.png antigo fica em assets/ como histórico/fallback.
+AVATAR_IMG = f"{ASSETS_DIR}/avatar_transparent.png"
 LOGO_IMG = f"{ASSETS_DIR}/logo.png"
 LOWERTHIRD_IMG = f"{ASSETS_DIR}/lowerthird.png"
 DUMMY_AUDIO = f"{ASSETS_DIR}/news_audio.wav"
@@ -60,6 +62,102 @@ def ensure_group():
             raise
 
 
+# --- Lower third: geometria da caixa do lowerthird.png (1920x200 @ y=800) ---
+# Medido no PNG: a faixa azul visível vai de x=200 a x=1720 e de y=840 a y=962
+# na tela (interior útil y≈842..960, centro y=901). O texto de NOTÍCIA agora é
+# posicionado DENTRO dessa caixa nas duas bordas (antes começava em x=60, fora).
+LT_TEXT_X = 218                           # borda interna esquerda (200) + folga
+LT_BOX_RIGHT = 1702                       # borda interna direita (1720) - folga
+LT_MAX_TEXT_PX = LT_BOX_RIGHT - LT_TEXT_X  # ~1484 px úteis
+LT_BASE_FONTSIZE = 44
+LT_MIN_FONTSIZE = 26
+LT_BOX_CENTER_Y = 901                     # centro vertical da faixa visível
+# Largura média de glifo da fonte sans padrão do ffmpeg (DejaVu Sans), para
+# títulos em PT (mistura maiúsc/minúsc + acentos). Conservador de propósito:
+# erra para quebrar/reduzir antes de vazar.
+LT_GLYPH_RATIO = 0.55
+
+
+def _approx_text_width(text, fontsize):
+    return len(text) * LT_GLYPH_RATIO * fontsize
+
+
+def _truncate_to_width(text, fontsize, max_px):
+    """Garantia dura: corta o texto ao que comprovadamente cabe em max_px."""
+    if _approx_text_width(text, fontsize) <= max_px:
+        return text
+    max_chars = max(1, int(max_px / (LT_GLYPH_RATIO * fontsize)) - 1)
+    return text[:max_chars].rstrip() + "…"
+
+
+def layout_lowerthird(title):
+    """Decide (texto, fontsize, y) do lower third para uma manchete de notícia
+    NÃO vazar da caixa do lowerthird.png:
+      - cabe em 1 linha no fontsize atual (44) -> mantém como está;
+      - senão, quebra em 2 linhas no espaço mais próximo da metade E reduz o
+        fontsize (até 26) se a linha mais longa ainda não couber;
+      - reposiciona o y para o texto seguir centralizado na altura da caixa.
+    """
+    title = " ".join(title.split())
+
+    def _y_for(fontsize, n_lines):
+        line_h = int(fontsize * 1.25)
+        return int(LT_BOX_CENTER_Y - (n_lines * line_h) / 2)
+
+    if _approx_text_width(title, LT_BASE_FONTSIZE) <= LT_MAX_TEXT_PX:
+        return title, LT_BASE_FONTSIZE, _y_for(LT_BASE_FONTSIZE, 1)
+
+    # Quebra em duas linhas no espaço mais próximo da metade do texto.
+    mid = len(title) // 2
+    left = title.rfind(" ", 0, mid)
+    right = title.find(" ", mid)
+    cands = [p for p in (left, right) if p != -1]
+    if cands:
+        split = min(cands, key=lambda p: abs(p - mid))
+        line1, line2 = title[:split].strip(), title[split:].strip()
+    else:
+        line1, line2 = title, ""
+
+    longest = max(len(line1), len(line2) if line2 else 0)
+
+    fontsize = LT_BASE_FONTSIZE
+    while fontsize > LT_MIN_FONTSIZE and longest * LT_GLYPH_RATIO * fontsize > LT_MAX_TEXT_PX:
+        fontsize -= 2
+
+    line1 = _truncate_to_width(line1, fontsize, LT_MAX_TEXT_PX)
+    if line2:
+        line2 = _truncate_to_width(line2, fontsize, LT_MAX_TEXT_PX)
+
+    text = f"{line1}\n{line2}" if line2 else line1
+    return text, fontsize, _y_for(fontsize, 2 if line2 else 1)
+
+
+def build_ticker_text(current_title, current_category):
+    """Texto do ticker = as últimas 5 manchetes REAIS (category != "Promoção")
+    do stream news.ready, concatenadas com ' • '. Recalculado a cada render.
+    Se algo falhar, cai no formato antigo (categoria + título atual)."""
+    try:
+        entries = r.xrevrange(INPUT_STREAM, "+", "-", count=40)
+        titles = []
+        seen = set()
+        for _id, d in entries:
+            cat = (d.get("category") or "").strip().lower()
+            if cat in ("promoção", "promocao", "promo"):
+                continue
+            t = " ".join((d.get("title") or "").split())
+            if t and t not in seen:
+                seen.add(t)
+                titles.append(t)
+            if len(titles) >= 5:
+                break
+        if not titles:
+            titles = [current_title] if current_title else []
+        return "  •  ".join(titles)
+    except Exception as e:
+        print(f"{TAG} → AVISO: falha ao montar ticker das últimas manchetes ({e}).", flush=True)
+        return f"{current_category.upper()}  •  {current_title}"
+
+
 def handle_event(event_id, data):
     """Processa UMA mensagem. Usado tanto pelo XREADGROUP (mensagens novas)
     quanto pelo XAUTOCLAIM (mensagens travadas recuperadas). Levanta exceção
@@ -80,34 +178,80 @@ def handle_event(event_id, data):
             print(f"{TAG} → AVISO: áudio '{requested_audio}' não encontrado, usando fallback.")
         AUDIO_FILE = DUMMY_AUDIO
 
-    print(f"{TAG} → Processando Notícia ID {news_id}: {title}")
+    tipo = "CHAMADA PROMO" if category.strip().lower() in ("promoção", "promocao", "promo") else "Notícia"
+    print(f"{TAG} → Processando {tipo} ID {news_id}: {title}")
+
+    # Chamada promocional (category == "Promoção"): mesma apresentadora, mesmo
+    # fundo e mesmo avatar — a ideia é parecer a mesma âncora fazendo uma chamada
+    # do canal irmão, não um anúncio que quebra o clima. Só muda o texto do lower
+    # third (vira o @ do canal), o texto do ticker e um selo sutil "INSCREVA-SE".
+    is_promo = category.strip().lower() in ("promoção", "promocao", "promo")
+
+    PROMO_LOWERTHIRD = "youtube.com/@FutureVerse-Beyond"
+    PROMO_TICKER = (
+        "INSCREVA-SE • FUTUREVERSE & BEYOND • +3000 VÍDEOS • CIÊNCIA • "
+        "TECNOLOGIA • ASTRONOMIA • AVIAÇÃO • GEOPOLÍTICA • INSCREVA-SE"
+    )
 
     # Escreve a manchete (lower third) e o texto do ticker em arquivos
     # temporários — evita todo problema de aspas/apóstrofos no filtro do ffmpeg.
+    if is_promo:
+        # Bloco promocional: @ do canal, curto e fixo — layout inalterado.
+        lowerthird_text, lt_x, lt_fontsize, lt_y = PROMO_LOWERTHIRD, "60", "50", "864"
+        ticker_text = PROMO_TICKER
+    else:
+        # Manchete: quebra/reduz e posiciona DENTRO da caixa do lowerthird.png.
+        lt_text, lt_fs, lt_y_int = layout_lowerthird(title)
+        lowerthird_text, lt_x = lt_text, str(LT_TEXT_X)
+        lt_fontsize, lt_y = str(lt_fs), str(lt_y_int)
+        # Ticker: as últimas 5 manchetes reais, recalculadas a cada render.
+        ticker_text = build_ticker_text(title, category)
+
     with open(title_txt_file, "w", encoding="utf-8") as f:
-        f.write(title)
+        f.write(lowerthird_text)
 
     with open(ticker_txt_file, "w", encoding="utf-8") as f:
-        f.write(f"{category.upper()}  •  {title}")
+        f.write(ticker_text)
+
+    # Parâmetros que diferenciam (sutilmente) o bloco promocional do de notícia:
+    # logo um pouco maior, lower third em cor de destaque e fonte maior.
+    logo_scale = "300:113" if is_promo else "220:83"
+    logo_xy = "40:24" if is_promo else "40:30"
+    lt_fontcolor = "0x00E0FF" if is_promo else "white"
 
     # COMPOSIÇÃO DO ESTÚDIO: fundo + apresentador + logo + lower third + ticker rolante
-    filter_complex = (
+    filter_parts = [
         # Fundo quase-16:9 (1672x941): escala cobrindo o frame e corta o excedente
         # sub-pixel. Sem distorção e sem tarjas — melhor que o scale=1920:1080 puro.
-        "[0:v]scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,setsar=1[bg];"
-        "[1:v]scale=270:378[av];"
-        # Avatar centralizado entre as duas poltronas centrais da cena nova,
-        # com a base tucada atrás do lower third (era overlay=1560:420 na cena antiga).
-        "[bg][av]overlay=825:452[bg1];"
-        "[2:v]scale=220:83[lg];"
-        "[bg1][lg]overlay=40:30[bg2];"
-        "[3:v]scale=1920:200[lt];"
-        "[bg2][lt]overlay=0:800[bg3];"
-        f"[bg3]drawtext=textfile='{title_txt_file}':fontcolor=white:fontsize=44:x=60:y=870[bg4];"
-        "[4:v]scale=1920:80[tk];"
-        "[bg4][tk]overlay=0:1000[bg5];"
-        f"[bg5]drawtext=textfile='{ticker_txt_file}':fontcolor=black:fontsize=28:x=w-mod(t*160\\,w+tw):y=1018[vout]"
+        "[0:v]scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,setsar=1[bg];",
+        # Recorte transparente: sem o retângulo opaco dá pra ela vir maior e mais
+        # à frente, sentada na poltrona central-direita da cena nova.
+        "[1:v]scale=410:574[av];",
+        # base (mãos/braços, onde o recorte tem a borda reta) fica escondida
+        # atrás do lower third (y>=800).
+        "[bg][av]overlay=940:305[bg1];",
+        f"[2:v]scale={logo_scale}[lg];",
+        f"[bg1][lg]overlay={logo_xy}[bg2];",
+        "[3:v]scale=1920:200[lt];",
+        "[bg2][lt]overlay=0:800[bg3];",
+        f"[bg3]drawtext=textfile='{title_txt_file}':fontcolor={lt_fontcolor}:fontsize={lt_fontsize}:x={lt_x}:y={lt_y}[bg4];",
+        "[4:v]scale=1920:80[tk];",
+        "[bg4][tk]overlay=0:1000[bg5];",
+    ]
+
+    last_label = "bg5"
+    if is_promo:
+        # Selo sutil logo abaixo do @ do canal: chama a ação sem destacar demais.
+        filter_parts.append(
+            "[bg5]drawtext=text='INSCREVA-SE  •  DEIXE SEU LIKE  •  ATIVE O SININHO':"
+            "fontcolor=0x00E0FF:fontsize=28:x=62:y=930[bg6];"
+        )
+        last_label = "bg6"
+
+    filter_parts.append(
+        f"[{last_label}]drawtext=textfile='{ticker_txt_file}':fontcolor=white:fontsize=28:x=w-mod(t*160\\,w+tw):y=1018[vout]"
     )
+    filter_complex = "".join(filter_parts)
 
     cmd = [
         "ffmpeg", "-y",

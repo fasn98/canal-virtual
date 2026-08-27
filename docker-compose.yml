@@ -47,12 +47,35 @@ services:
       - canalnet
     environment:
       - PYTHONUNBUFFERED=1
+      # Geração do comentário via Claude (Anthropic). A chave real vai no .env.
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      # Necessário para chaves identity-linked (senão a API responde 400).
+      - ANTHROPIC_WORKSPACE_ID=${ANTHROPIC_WORKSPACE_ID:-}
+      - ANTHROPIC_MODEL=${ANTHROPIC_MODEL:-claude-sonnet-4-5}
+      # Tamanho alvo do comentário (palavras). ~300 ≈ 2 min de fala.
+      # Reduza (ex.: 40) só para testes rápidos — NÃO subir para produção assim.
+      - TARGET_COMMENTARY_WORDS=${TARGET_COMMENTARY_WORDS:-300}
       - STUCK_MESSAGE_TIMEOUT_MS=${STUCK_MESSAGE_TIMEOUT_MS:-60000}
       - MAX_DELIVERY_ATTEMPTS=${MAX_DELIVERY_ATTEMPTS:-3}
       - STUCK_SCAN_INTERVAL_SEC=${STUCK_SCAN_INTERVAL_SEC:-30}
     depends_on:
       - redis
       - classifier
+
+  promoter:
+    build: ./promoter
+    container_name: promoter
+    restart: always
+    networks:
+      - canalnet
+    environment:
+      - PYTHONUNBUFFERED=1
+      # Gatilho por contagem: 1 chamada promocional a cada N notícias reais
+      # renderizadas (escuta news.block). Produção = 5 (ciclo de ~11 min).
+      - NEWS_PER_PROMO=${NEWS_PER_PROMO:-5}
+    depends_on:
+      - redis
+      - renderer
 
   synthesizer:
     build: ./synthesizer
