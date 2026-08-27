@@ -1,0 +1,54 @@
+# Image-generation prompt for assets/studio_bg.jpg
+#
+# This is the source prompt used to generate the studio background still.
+# Output goes to: assets/studio_bg.jpg
+# Consumed by:    renderer/make_studio.sh
+#   - upscales the source to 2200x1238, then does a slow sine/cosine pan-crop
+#     to 1920x1080, so render at >= 2200 wide (2560x1440 recommended).
+#   - overlays assets/avatar.png at roughly x=1200-1680, y=400+ (right-center).
+#     Keep that region uncluttered in addition to the bottom third.
+#
+# ---------------------------------------------------------------------------
+
+PROMPT PARA GERAÇÃO DE IMAGEM — Cenário de Estúdio Futurista (FutureVerse News)
+
+Wide-angle establishing shot of a futuristic, high-end television news studio,
+inspired by the layout of a real broadcast roundtable set. Eye-level camera,
+slightly elevated, capturing the full width of the room in 16:9 landscape format.
+
+COMPOSITION:
+- 4 sleek, modern chairs arranged in a loose curved arc, facing slightly toward
+  the center of the frame, evenly spaced with clear negative space between them —
+  leave the chairs empty (no people)
+- Camera framing similar to a panel/roundtable news broadcast: wide shot showing
+  the full seating arc and the environment behind it
+- Reserve the bottom third of the frame as a relatively simple, uncluttered floor
+  area with soft ambient lighting — this space will have text overlays added
+  later, so avoid busy detail or bright highlights directly in the bottom 20% of
+  the frame
+
+ENVIRONMENT:
+- Futuristic newsroom/broadcast studio, sleek and modern rather than sci-fi or
+  fantastical — polished floors, minimalist architecture, floor-to-ceiling glass
+  or paneled walls
+- Ambient holographic-style data displays and translucent screens integrated
+  subtly into the background walls, showing abstract charts, network graphics,
+  and soft glowing UI elements
+- Cool color palette dominated by deep navy and charcoal tones, accented with
+  cyan/electric-blue lighting (rim lighting on furniture edges, subtle floor
+  lighting, glowing panel outlines)
+- Soft overhead studio lighting with a few visible light fixtures, avoiding harsh
+  shadows
+- A large curved or panoramic screen/wall as the backdrop, suggesting a global
+  news network control room
+
+STYLE:
+- Photorealistic, high production value, comparable to a real flagship TV news
+  studio set
+- Clean and professional, NOT cluttered with excessive sci-fi glow or neon —
+  subtle futuristic accents, not a spaceship
+- High resolution, sharp detail, no motion blur
+- No text, no logos, no watermarks, no people in the scene
+
+ASPECT RATIO: 16:9 landscape, minimum 1920x1080, ideally higher (2560x1440 or
+greater) for clean downscaling.
