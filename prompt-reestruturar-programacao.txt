@@ -1,0 +1,40 @@
+Quero reestruturar a programação do canal em várias frentes relacionadas. São 5 mudanças, todas conectadas — implemente na ordem abaixo.
+
+## 1. Comentário mais longo via Claude API (substituindo os templates fixos)
+
+Em commentator/main.py, troque a geração de comentário por templates fixos por uma chamada real à API da Anthropic (Claude), pra gerar um comentário natural de aproximadamente 280-320 palavras (isso dá em torno de 2 minutos de fala em voz humana), em português, por notícia.
+
+- Precisa da variável de ambiente ANTHROPIC_API_KEY (adicione ao .env.example e ao docker-compose.yml, serviço commentator). Eu ainda vou gerar essa chave em console.anthropic.com e colocar no .env real.
+- Use o modelo "claude-sonnet-4-5" (ou o mais recente disponível se esse não funcionar — teste e me avise qual usou).
+- Prompt sugerido pro Claude (ajuste se achar que melhora a qualidade): dar o título, resumo e categoria da notícia, pedir uma análise jornalística objetiva de ~300 palavras em português, sem inventar fatos que não estão no título/resumo fornecido, contextualizando o tema, mantendo tom de comentário analítico (não é a notícia em si, é uma interpretação/contexto sobre ela).
+- Torne o tamanho alvo configurável via variável de ambiente TARGET_COMMENTARY_WORDS (padrão 300), pra eu poder reduzir durante testes sem precisar mudar código.
+- Trate erro de API (rate limit, timeout, chave inválida) com um fallback razoável (pode ser um comentário curto genérico, tipo o template antigo) em vez de travar o pipeline.
+
+## 2. Corrigir o overflow do texto na barra de manchete (lower third)
+
+Hoje, manchetes longas ultrapassam visualmente a borda da caixa do lowerthird.png (vi isso acontecer ao vivo). Corrija em renderer/main.py:
+
+- Se o título for curto o suficiente pra caber numa linha no fontsize atual (44), mantenha como está.
+- Se for longo, quebre em duas linhas (insira \n no ponto de espaço mais próximo da metade do texto) E/OU reduza o fontsize proporcionalmente ao tamanho do texto, o que fizer mais sentido visualmente pra não estourar a caixa. Ajuste o y de início do texto se for pra duas linhas, pra continuar centralizado dentro da altura da caixa do lowerthird.
+- Teste com um título propositalmente longo (tipo 90+ caracteres) pra confirmar que não vaza mais pra fora da borda.
+
+## 3. Ticker mostrando as últimas 5 manchetes reais, rolando
+
+Hoje o ticker mostra só categoria+título do item atual sendo processado. Troque para: buscar as últimas 5 notícias REAIS (category != "Promoção") do stream news.ready via XREVRANGE, pegar os títulos delas, e montar o texto do ticker como esses 5 títulos concatenados com um separador tipo " • ", rolando continuamente (mantenha a fórmula de scroll que já corrigimos antes, que começa visível desde o frame 0). Isso deve ser recalculado a cada novo item renderizado, não fixo.
+
+## 4. Trocar o gatilho de promoção: de timer fixo pra contagem de 5 notícias reais
+
+O serviço "promoter" que criamos antes (timer de N segundos) não bate direito com a estrutura que eu quero agora: 5 notícias reais (~2min cada) seguidas de 1 bloco de promoção, formando um ciclo de ~11 minutos.
+
+Substitua a lógica de timer por uma lógica orientada a evento: crie um contador (pode ser uma chave no Redis, tipo um INCR simples) que é incrementado toda vez que o renderer processa e finaliza com sucesso uma notícia REAL (category != "Promoção"). Quando esse contador atingir 5, dispare a mensagem promocional (mesmo conteúdo/formato que já implementamos: title "Inscreva-se: FutureVerse & Beyond", category "Promoção", o texto promocional sobre o canal FutureVerse & Beyond) publicada em news.final, e zere o contador.
+
+Decida você onde é mais limpo colocar essa lógica de contagem (pode ser no próprio renderer, ou manter um serviço separado tipo o promoter mas mudando de "dorme e publica" pra "escuta news.block e conta") — use seu julgamento de arquitetura, mas evite duplicar a lógica de gerar/publicar a mensagem promocional que já existe.
+
+## 5. Teste end-to-end e preview antes de produção
+
+- Pra não esperar ~11 minutos reais de teste, use TARGET_COMMENTARY_WORDS baixo (tipo 40) temporariamente, o que vai gerar áudio bem mais curto e o ciclo completo (5 notícias + 1 promo) vai passar rápido.
+- Confirme: (a) o comentário gerado pelo Claude está saindo em português e coerente com o título/resumo dado; (b) o ticker está mostrando as 5 manchetes reais rolando, não travado numa só; (c) uma manchete longa não vaza mais da caixa; (d) depois de exatamente 5 notícias reais processadas, a promoção dispara automaticamente, sem eu precisar fazer nada manual.
+- Gere um preview de frame de uma notícia com manchete longa (pra eu confirmar visualmente o fix do overflow) e me avise onde está.
+- NÃO suba pra produção com TARGET_COMMENTARY_WORDS baixo — depois do teste confirmado, volte pro valor de produção (300) antes de me avisar que está pronto pra eu aprovar.
+
+Me dê um resumo do que foi feito e dos resultados de teste ao final, e só faça build/restart definitivo dos containers depois que eu confirmar que aprovo o preview.

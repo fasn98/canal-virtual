@@ -1,0 +1,11 @@
+O recorte transparente da apresentadora foi aprovado (assets/avatar_transparent.png). Agora quero integrar isso de verdade no renderer, substituindo o avatar.png antigo (com fundo retangular opaco) na composição do estúdio.
+
+1. Em renderer/main.py, troque AVATAR_IMG para apontar pra assets/avatar_transparent.png em vez de assets/avatar.png. Confirme antes que o arquivo existe em /app/assets/avatar_transparent.png dentro do container renderer (ele já deveria estar lá de quando geramos o preview, mas confirme).
+
+2. Agora que ela não tem mais fundo retangular, a posição/tamanho ideal pode mudar — sem o retângulo, provavelmente dá pra ela ficar maior e mais integrada à cena (ex: ocupando mais espaço vertical, dando a impressão de estar "de pé" ou "sentada" numa das poltronas centrais, já que agora só o contorno da pessoa aparece, não uma caixa). Use seu julgamento visual, pode testar mais de uma posição/escala se achar necessário.
+
+3. Gere um novo frame de preview igual fizemos antes: use o background novo (studio_bg_novo.png), o avatar transparente, logo, lowerthird, ticker, mais um áudio de teste de uns 5 segundos (ffmpeg -f lavfi -i "sine=frequency=440:duration=5"), extraia um frame do meio pra /opt/canal-virtual/preview_avatar_integrado.png.
+
+4. De novo, NÃO suba pra produção ainda (não faça build/restart do container renderer real) — só o preview local, até eu aprovar visualmente.
+
+5. Me avise quando o preview_avatar_integrado.png estiver pronto.

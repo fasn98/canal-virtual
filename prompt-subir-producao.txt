@@ -1,0 +1,13 @@
+Aprovado! O preview_avatar_integrado.png ficou ótimo. Pode subir pra produção agora:
+
+1. Faça o build do renderer (docker compose build renderer) e suba com docker compose up -d --force-recreate renderer.
+
+2. Injete uma notícia de teste real no Redis pra confirmar que o pipeline completo gera o final.mp4 com a nova composição (fundo studio_bg_novo.png + avatar transparente na posição/escala aprovada + logo + lower third + ticker).
+
+3. Confirme nos logs do renderer que deu SUCESSO EMISSÃO, sem erro de ffmpeg.
+
+4. Espere um ciclo do streamer pegar esse novo final.mp4 e confirme que ele está sendo transmitido (docker logs streamer, olhando o time= subindo sem erro).
+
+5. Não precisa mexer em mais nada além do renderer — o resto do pipeline (collector, classifier, commentator, synthesizer, streamer) continua como está.
+
+6. Me dê um resumo final confirmando que está tudo no ar com a nova composição.

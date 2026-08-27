@@ -1,0 +1,19 @@
+Tenho alguns ajustes pendentes pra fazer, em ordem de prioridade:
+
+## 1. Cor do ticker (prioridade alta — bug visível ao vivo agora)
+
+O texto do ticker rolante está com fontcolor=black no drawtext, e está ilegível/sumindo contra o fundo. Troque pra fontcolor=white em renderer/main.py, no drawtext do ticker (o segundo drawtext do filter_complex, que usa ticker_txt_file). Build e restart do renderer, direto pra produção — mudança simples, sem necessidade de preview.
+
+## 2. Confirmar que a reestruturação da programação está com os valores de produção (prioridade alta)
+
+Na última tarefa grande (comentário via Claude API + ticker com 5 manchetes + promoção a cada 5 notícias), pedi pra testar com TARGET_COMMENTARY_WORDS baixo e depois voltar pro valor de produção (300) antes de considerar pronto. Confirme qual é o valor atual dessa variável em produção agora — se ainda estiver no valor de teste, corrija pra 300. Me diga qual valor encontrou.
+
+## 3. Testar e confirmar visualmente o fix de manchete longa (prioridade média)
+
+Ainda não vi uma confirmação visual de que o fix de overflow do lower third (quebra de linha / fonte dinâmica pra manchetes longas) está funcionando em produção com uma notícia real. Injete uma notícia de teste com um título propositalmente longo (90+ caracteres) no pipeline real, deixe renderizar, e gere um preview de frame pra eu confirmar visualmente que não vaza mais da caixa. Pode apagar a notícia de teste do fluxo normal depois (não precisa ser uma notícia real, só visualmente correta).
+
+## 4. Limpeza de diretórios/scripts legados (prioridade baixa — pode ficar por último, só se sobrar tempo)
+
+Lá no início do projeto, você identificou que api/, api-gateway/, orchestrator/, ultrafast/ e vários scripts .sh soltos na raiz (reset_pipeline.sh, auto_top10.sh, update_news.sh, etc.) não fazem parte do docker-compose.yml atual e são restos de iterações anteriores. Já removemos o presenter formalmente. Para o resto: NÃO apague nada ainda — só liste de novo pra mim o que sobrou de código morto/não utilizado no projeto hoje (pastas e arquivos soltos), com uma frase de cada um dizendo se é seguro remover ou se tem alguma dúvida sobre uso. Eu decido depois o que arquivar/remover.
+
+Me dê um resumo ao final com o status de cada um dos 4 itens.

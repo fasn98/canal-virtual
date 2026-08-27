@@ -1,0 +1,28 @@
+Quero adicionar um bloco promocional do meu outro canal do YouTube, "FutureVerse & Beyond" (https://www.youtube.com/@FutureVerse-Beyond), que apareça a cada 10 minutos dentro da transmissão, promovendo esse canal (mais de 3000 vídeos sobre ciência, tecnologia, astronomia, aviação e geopolítica), pedindo pros espectadores se inscreverem e curtirem.
+
+Arquitetura proposta (siga essa a menos que veja um problema real com ela):
+
+1. NOVO SERVIÇO "promoter": um container Python simples, só com dependência redis, que roda um loop: a cada N segundos (padrão 600 = 10 minutos, configurável via variável de ambiente PROMO_INTERVAL_SECONDS), publica diretamente no stream news.final (o mesmo que o commentator escreve) uma mensagem com:
+   - id: um identificador único (ex: "promo-" + timestamp ou uuid)
+   - title: "Inscreva-se: FutureVerse & Beyond"
+   - category: "Promoção"
+   - commentary: o texto abaixo (ajuste levemente se achar que soa mais natural em voz, mas mantenha a mensagem e o tom):
+     "Se você gosta do que vê aqui, vai adorar o canal FutureVerse & Beyond. São mais de três mil vídeos sobre ciência, tecnologia, astronomia, aviação e geopolítica. Inscreva-se, deixe seu like, e faça parte dessa comunidade que já é referência em conteúdo de qualidade. O link está na tela."
+   - timestamp: time.time()
+
+   Isso significa que a mensagem promocional entra no MESMO pipeline das notícias reais (synthesizer gera a voz dela normalmente, renderer gera o vídeo normalmente) — não precisa duplicar lógica de TTS nem de renderização do zero.
+
+2. Adicione o serviço promoter ao docker-compose.yml (depends_on: redis, sem volumes especiais, só a env var PROMO_INTERVAL_SECONDS).
+
+3. Em renderer/main.py, detecte quando category == "Promoção" e use uma composição visual um pouco diferente da notícia normal, reaproveitando o máximo possível do que já existe (mesmo fundo studio_bg_novo.png, mesmo avatar transparente — a ideia é que pareça a mesma apresentadora fazendo uma chamada, não um anúncio destacado/quebrando o clima do canal):
+   - Na barra de lower third (onde normalmente vai a manchete), mostre: "youtube.com/@FutureVerse-Beyond" em destaque
+   - No ticker rolante, ao invés do texto padrão categoria+manchete, mostre algo como: "INSCREVA-SE • FUTUREVERSE & BEYOND • +3000 VÍDEOS • CIÊNCIA • TECNOLOGIA • ASTRONOMIA • AVIAÇÃO • GEOPOLÍTICA • INSCREVA-SE"
+   - Pode adicionar um elemento visual extra sutil (ex: o texto "INSCREVA-SE" com destaque de cor, ou o logo em tamanho um pouco maior) pra diferenciar visualmente de um bloco de notícia normal, mas sem exagerar — quero que pareça parte do programa, não uma quebra brusca.
+
+4. NÃO precisa mexer no synthesizer nem no streamer — eles já processam qualquer coisa que vier pela stream normalmente, sem precisar saber que é promoção.
+
+5. Teste: pra não esperar 10 minutos de verdade, defina PROMO_INTERVAL_SECONDS=30 temporariamente só pro teste, confirme que uma mensagem promocional aparece no fluxo, ganha voz real do synthesizer, é renderizada com a composição visual diferenciada, e o streamer transmite ela normalmente intercalada com as notícias reais. Depois do teste confirmado, volte PROMO_INTERVAL_SECONDS pro valor de produção (600 = 10 minutos) antes de subir de vez.
+
+6. Gere um frame de preview da composição promocional (igual fizemos com os outros previews) pra eu aprovar visualmente ANTES de deixar rodando de verdade em produção com o intervalo de 10 minutos real.
+
+7. Me avise quando o preview estiver pronto e onde está.
