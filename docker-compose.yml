@@ -107,6 +107,10 @@ services:
       - STUCK_MESSAGE_TIMEOUT_MS=${STUCK_MESSAGE_TIMEOUT_MS:-60000}
       - MAX_DELIVERY_ATTEMPTS=${MAX_DELIVERY_ATTEMPTS:-3}
       - STUCK_SCAN_INTERVAL_SEC=${STUCK_SCAN_INTERVAL_SEC:-30}
+      # Lip-sync real do avatar via D-ID (POC, plano Pro). false = pipeline
+      # atual (avatar estático); true = tenta D-ID e cai no estático se falhar.
+      - ENABLE_LIPSYNC=${ENABLE_LIPSYNC:-false}
+      - DID_API_KEY=${DID_API_KEY:-}
     depends_on:
       - synthesizer
       - redis

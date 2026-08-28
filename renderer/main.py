@@ -21,6 +21,32 @@ STUCK_SCAN_INTERVAL_SEC = int(os.environ.get("STUCK_SCAN_INTERVAL_SEC", "30"))
 
 _last_stuck_scan = 0.0
 
+# --- Lip-sync opcional (D-ID) ---
+# ENABLE_LIPSYNC=false (padrão) => pipeline idêntico ao de hoje (avatar estático).
+# ENABLE_LIPSYNC=true  => antes de compor o bloco, tenta gerar um vídeo com
+# lip-sync real via D-ID (renderer/lipsync.py, totalmente isolado). Qualquer
+# falha cai no avatar estático. Ver renderer/lipsync.py.
+ENABLE_LIPSYNC = os.environ.get("ENABLE_LIPSYNC", "false").strip().lower() in (
+    "1", "true", "yes", "on",
+)
+
+# --- Chroma key do vídeo de lip-sync (D-ID) ---
+# O mp4 que volta do D-ID tem o fundo verde de assets/avatar_greenscreen.png
+# (mp4 não tem transparência real). Antes do overlay, o renderer remove esse
+# verde com chromakey (YUV) + despill, recriando o efeito do recorte
+# transparente sem o "retângulo flutuante" do fundo original da foto.
+# Tudo via env pra afinar sem rebuild (ver README / .env.example):
+#   COLOR      = mesma cor usada em avatar_greenscreen.png (#00B140)
+#   SIMILARITY = quão perto do verde ainda conta como fundo (maior = remove mais)
+#   BLEND      = suavização da borda do alpha (maior = borda mais macia)
+DID_CHROMA_COLOR = os.environ.get("DID_CHROMA_COLOR", "0x00B140").strip()
+DID_CHROMA_SIMILARITY = os.environ.get("DID_CHROMA_SIMILARITY", "0.14").strip()
+DID_CHROMA_BLEND = os.environ.get("DID_CHROMA_BLEND", "0.06").strip()
+# despill: tira o resíduo/halo verde em cabelo e ombros depois do recorte.
+DID_CHROMA_DESPILL = os.environ.get("DID_CHROMA_DESPILL", "true").strip().lower() in (
+    "1", "true", "yes", "on",
+)
+
 # Definições de Diretórios Internos do Container
 OUTPUT_DIR = "/app/output"
 TICKER_DIR = "/app/ticker"
@@ -181,6 +207,17 @@ def handle_event(event_id, data):
     tipo = "CHAMADA PROMO" if category.strip().lower() in ("promoção", "promocao", "promo") else "Notícia"
     print(f"{TAG} → Processando {tipo} ID {news_id}: {title}")
 
+    # Lip-sync opcional: só quando ligado e quando há áudio real (mp3) do
+    # synthesizer — nunca para o áudio de fallback. Em falha, `lipsync_video`
+    # fica None e a composição usa a imagem estática, exatamente como antes.
+    lipsync_video = None
+    if ENABLE_LIPSYNC and AUDIO_FILE != DUMMY_AUDIO:
+        try:
+            from lipsync import get_lipsync_video
+            lipsync_video = get_lipsync_video(news_id, AUDIO_FILE)
+        except Exception as e:
+            print(f"{TAG} → AVISO: lip-sync indisponível ({e}); usando avatar estático.", flush=True)
+
     # Chamada promocional (category == "Promoção"): mesma apresentadora, mesmo
     # fundo e mesmo avatar — a ideia é parecer a mesma âncora fazendo uma chamada
     # do canal irmão, não um anúncio que quebra o clima. Só muda o texto do lower
@@ -219,14 +256,34 @@ def handle_event(event_id, data):
     logo_xy = "40:24" if is_promo else "40:30"
     lt_fontcolor = "0x00E0FF" if is_promo else "white"
 
+    # Filtro da entrada [1:v] (apresentadora): a imagem estática só escala; o
+    # vídeo de lip-sync do D-ID vem com fundo verde e precisa ter o verde
+    # removido ANTES do overlay — senão o mp4 opaco reintroduz o "retângulo".
+    if lipsync_video:
+        despill = ",despill=type=green:mix=0.5:expand=0" if DID_CHROMA_DESPILL else ""
+        avatar_filter = (
+            f"[1:v]scale=410:574,"
+            f"chromakey={DID_CHROMA_COLOR}:{DID_CHROMA_SIMILARITY}:{DID_CHROMA_BLEND}"
+            f"{despill}[av];"
+        )
+        print(
+            f"{TAG} → chroma key no vídeo de lip-sync: color={DID_CHROMA_COLOR} "
+            f"similarity={DID_CHROMA_SIMILARITY} blend={DID_CHROMA_BLEND} "
+            f"despill={'on' if DID_CHROMA_DESPILL else 'off'}",
+            flush=True,
+        )
+    else:
+        avatar_filter = "[1:v]scale=410:574[av];"
+
     # COMPOSIÇÃO DO ESTÚDIO: fundo + apresentador + logo + lower third + ticker rolante
     filter_parts = [
         # Fundo quase-16:9 (1672x941): escala cobrindo o frame e corta o excedente
         # sub-pixel. Sem distorção e sem tarjas — melhor que o scale=1920:1080 puro.
         "[0:v]scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,setsar=1[bg];",
-        # Recorte transparente: sem o retângulo opaco dá pra ela vir maior e mais
-        # à frente, sentada na poltrona central-direita da cena nova.
-        "[1:v]scale=410:574[av];",
+        # Recorte da apresentadora (transparente na imagem estática; verde removido
+        # por chroma key no vídeo do D-ID). Sem retângulo opaco ela vem maior e
+        # mais à frente, sentada na poltrona central-direita da cena nova.
+        avatar_filter,
         # base (mãos/braços, onde o recorte tem a borda reta) fica escondida
         # atrás do lower third (y>=800).
         "[bg][av]overlay=940:305[bg1];",
@@ -253,10 +310,21 @@ def handle_event(event_id, data):
     )
     filter_complex = "".join(filter_parts)
 
+    # Entrada 1 = apresentadora. Estático: imagem em loop. Lip-sync: o mp4 do
+    # D-ID, em loop (-stream_loop -1) para nunca congelar se ficar um pouco mais
+    # curto que o áudio; o -shortest lá embaixo corta na duração do áudio.
+    # O restante do filter_complex ([1:v]scale=410:574 -> overlay=940:305) vale
+    # igual para imagem ou vídeo — mesma posição/tamanho já calibrados.
+    if lipsync_video:
+        avatar_input = ["-stream_loop", "-1", "-i", lipsync_video]
+        print(f"{TAG} → Avatar com LIP-SYNC (D-ID): {lipsync_video}")
+    else:
+        avatar_input = ["-loop", "1", "-i", AVATAR_IMG]
+
     cmd = [
         "ffmpeg", "-y",
         "-loop", "1", "-i", BACKGROUND_IMG,
-        "-loop", "1", "-i", AVATAR_IMG,
+        *avatar_input,
         "-loop", "1", "-i", LOGO_IMG,
         "-loop", "1", "-i", LOWERTHIRD_IMG,
         "-loop", "1", "-i", TICKER_IMG,
@@ -377,6 +445,11 @@ def main():
             time.sleep(3)
 
     print("Renderer 2D → Motor Gráfico Online. Aguardando news.ready...")
+    print(
+        f"{TAG} → lip-sync (D-ID): {'ATIVADO' if ENABLE_LIPSYNC else 'desativado'} "
+        f"(ENABLE_LIPSYNC={os.environ.get('ENABLE_LIPSYNC', 'false')}).",
+        flush=True,
+    )
     print(
         f"{TAG} → recuperação automática ativa "
         f"(timeout={STUCK_TIMEOUT_MS}ms, max_tentativas={MAX_DELIVERY_ATTEMPTS}, "
