@@ -1,9 +1,16 @@
 import time
 import os
+import datetime
 import redis
-import json
 
 import anthropic
+
+from review import (
+    review_commentary,
+    ReviewUnavailable,
+    REVIEW_ENABLED,
+    MAX_CORRECTION_ATTEMPTS,
+)
 
 r = redis.Redis(host="redis", port=6379, decode_responses=True, socket_timeout=10)
 
@@ -53,6 +60,53 @@ OUTPUT_STREAM = "news.final"
 GROUP = "commentator-group"
 CONSUMER = os.environ.get("HOSTNAME", "consumer-1")
 TAG = "Commentator"
+
+# --- Cache de comentário (por id de notícia) ---
+# Hash Redis: campo = id da notícia (estável, vem do collector), valor = texto
+# do comentário já gerado pelo Claude. Evita re-chamar a API quando o mesmo id
+# volta a passar pelo pipeline — o que acontece bastante, porque o controle de
+# duplicatas do collector é em memória e ele re-publica todo o feed a cada
+# restart. Sem TTL: comentário de notícia antiga não muda. Só entram no cache
+# comentários vindos de fato da API (o fallback curto não é cacheado, para que
+# uma passagem futura ainda tenha chance de gerar o comentário real).
+COMMENTARY_CACHE_KEY = os.environ.get("COMMENTARY_CACHE_KEY", "commentary_cache")
+
+
+def get_cached_commentary(news_id):
+    """Retorna o comentário já salvo para este id, ou None se não houver
+    (ou se o Redis falhar — nesse caso o pipeline apenas gera de novo)."""
+    if not news_id:
+        return None
+    try:
+        return r.hget(COMMENTARY_CACHE_KEY, news_id)
+    except Exception as e:
+        print(f"{TAG} → falha ao ler cache de comentário ({news_id}): {e}", flush=True)
+        return None
+
+
+def save_cached_commentary(news_id, text):
+    if not news_id or not text:
+        return
+    try:
+        r.hset(COMMENTARY_CACHE_KEY, news_id, text)
+    except Exception as e:
+        print(f"{TAG} → falha ao salvar cache de comentário ({news_id}): {e}", flush=True)
+
+
+# --- Contadores para a metrics-api (best-effort) ---------------------------
+# Chaves `metrics:<campo>:<data>` lidas pelo serviço metrics-api (chamadas ao
+# Claude por tipo, cache hit/miss de comentário). Qualquer falha é ignorada:
+# nunca interfere no pipeline.
+METRICS_TTL_SEC = 8 * 24 * 3600
+
+
+def bump_metric(field, n=1):
+    try:
+        key = f"metrics:{field}:{datetime.date.today().isoformat()}"
+        r.incrby(key, n)
+        r.expire(key, METRICS_TTL_SEC)
+    except Exception:
+        pass
 
 # --- Recuperação automática de mensagens travadas ---
 STUCK_TIMEOUT_MS = int(os.environ.get("STUCK_MESSAGE_TIMEOUT_MS", "60000"))
@@ -115,9 +169,9 @@ def build_fallback_commentary(title, category):
     )
 
 
-def build_commentary_prompt(title, summary, category):
+def build_commentary_prompt(title, summary, category, correction=None):
     alvo = TARGET_COMMENTARY_WORDS
-    return (
+    base = (
         "Você é um comentarista de telejornal. Escreva um comentário analítico, "
         "em português do Brasil, sobre a notícia abaixo.\n\n"
         f"TÍTULO: {title}\n"
@@ -133,15 +187,29 @@ def build_commentary_prompt(title, summary, category):
         "- Texto corrido, em português, sem título, sem marcadores, sem markdown. "
         "Comece direto no comentário.\n"
     )
+    if correction:
+        prev_text, motivo = correction
+        base += (
+            "\nATENÇÃO — esta é uma REESCRITA. A versão anterior foi REPROVADA "
+            "na revisão editorial pelo seguinte motivo:\n"
+            f"    {motivo}\n"
+            "Reescreva o comentário do zero corrigindo especificamente esse "
+            "problema, mantendo-se estritamente dentro do título e do resumo "
+            "acima. Versão anterior (NÃO repita os erros dela):\n"
+            f"---\n{prev_text}\n---\n"
+        )
+    return base
 
 
-def generate_commentary(title, summary, category):
-    """Gera o comentário via Claude (Anthropic). Qualquer erro de API
-    (chave inválida, rate limit, timeout, resposta vazia) cai no fallback
-    curto em vez de travar o pipeline."""
+def generate_commentary(title, summary, category, correction=None):
+    """Gera o comentário via Claude (Anthropic). Retorna (texto, veio_da_api):
+    veio_da_api=True quando a resposta é do Claude (pode ser cacheada),
+    False quando qualquer erro de API (chave inválida, rate limit, timeout,
+    resposta vazia) forçou o fallback curto — que NÃO deve ser cacheado.
+    `correction=(texto_anterior, motivo)` pede uma reescrita corrigida."""
     try:
         client = get_anthropic_client()
-        prompt = build_commentary_prompt(title, summary, category)
+        prompt = build_commentary_prompt(title, summary, category, correction)
         # ~3.2 tokens por palavra-alvo, com piso e teto de segurança.
         max_toks = min(2000, max(400, int(TARGET_COMMENTARY_WORDS * 3.2)))
 
@@ -150,6 +218,7 @@ def generate_commentary(title, summary, category):
             max_tokens=max_toks,
             messages=[{"role": "user", "content": prompt}],
         )
+        bump_metric("claude_calls:commentary")
 
         text = "\n".join(
             b.text.strip() for b in resp.content
@@ -164,7 +233,7 @@ def generate_commentary(title, summary, category):
             f"(modelo={ANTHROPIC_MODEL}, ~{len(text.split())} palavras)",
             flush=True,
         )
-        return text
+        return text, True
 
     except Exception as e:
         print(
@@ -172,7 +241,54 @@ def generate_commentary(title, summary, category):
             "Usando fallback curto.",
             flush=True,
         )
-        return build_fallback_commentary(title, category)
+        return build_fallback_commentary(title, category), False
+
+
+def produce_approved_commentary(news_id, title, title_original, summary,
+                                category, source):
+    """Gera o comentário e o submete aos três revisores (verificador de fatos,
+    revisor editorial, aprovador final). Enquanto BLOQUEADO, devolve ao
+    commentator para reescrever com o motivo da rejeição — no máximo
+    MAX_CORRECTION_ATTEMPTS correções. Retorna o texto LIBERADO, ou None se as
+    tentativas se esgotaram (o item deve ser descartado, não publicado).
+    Levanta ReviewUnavailable se a revisão não pôde ser feita (API fora)."""
+    client = get_anthropic_client()
+
+    prev_text, motivo = None, None
+    for tentativa in range(MAX_CORRECTION_ATTEMPTS + 1):
+        if tentativa == 0:
+            text, from_api = generate_commentary(title, summary, category)
+        else:
+            print(
+                f"{TAG} → Devolvido ao commentator (correção {tentativa}/"
+                f"{MAX_CORRECTION_ATTEMPTS}) para {news_id}: {motivo}",
+                flush=True,
+            )
+            text, from_api = generate_commentary(
+                title, summary, category, correction=(prev_text, motivo)
+            )
+
+        # Fallback curto = API do comentário fora; os revisores usam a mesma
+        # API e também vão falhar. Não adianta revisar: deixa a mensagem
+        # pendente para o reprocessamento tentar de novo mais tarde.
+        if not from_api:
+            raise ReviewUnavailable("API de geração indisponível (fallback curto)")
+
+        liberado, motivo = review_commentary(
+            client=client,
+            news_id=news_id,
+            commentary=text,
+            title=title,
+            title_original=title_original,
+            summary=summary,
+            category=category,
+            source=source,
+        )
+        if liberado:
+            return text
+        prev_text = text
+
+    return None
 
 
 def handle_event(event_id, data):
@@ -186,8 +302,42 @@ def handle_event(event_id, data):
     title_original = safe(data.get("title_original"))
     category = safe(data.get("category"))
     summary = safe(data.get("summary", ""))
+    # Rótulo da fonte ("BBC"/"Guardian"), vindo do collector via classifier.
+    source = safe(data.get("source", ""))
 
-    commentary = generate_commentary(title, summary, category)
+    # Cache por id: guarda apenas o comentário JÁ APROVADO. Um HIT pula tanto
+    # a geração quanto a revisão — uma notícia aprovada não é revista de novo.
+    commentary = get_cached_commentary(news_id)
+    if commentary:
+        print(
+            f"{TAG} → Cache HIT para {news_id}, reaproveitando comentário aprovado",
+            flush=True,
+        )
+        bump_metric("cache:commentary:hit")
+    elif REVIEW_ENABLED:
+        bump_metric("cache:commentary:miss")
+        commentary = produce_approved_commentary(
+            news_id, title, title_original, summary, category, source
+        )
+        if commentary is None:
+            # Reprovado nas tentativas de correção: NÃO publica. Descarta este
+            # item (XACK sem XADD) e segue para o próximo da fila.
+            r.xack(INPUT_STREAM, GROUP, event_id)
+            print(
+                f"{TAG} → ITEM DESCARTADO para {news_id}: reprovado na revisão "
+                f"editorial após {MAX_CORRECTION_ATTEMPTS} tentativas de "
+                f"correção. NÃO publicado. title={title!r}",
+                flush=True,
+            )
+            return
+        save_cached_commentary(news_id, commentary)
+    else:
+        # Revisão desligada (ENABLE_EDITORIAL_REVIEW=false): comportamento
+        # antigo — publica direto, cacheia só o que veio da API.
+        bump_metric("cache:commentary:miss")
+        commentary, from_api = generate_commentary(title, summary, category)
+        if from_api:
+            save_cached_commentary(news_id, commentary)
 
     out = {
         "id": news_id,
@@ -195,6 +345,7 @@ def handle_event(event_id, data):
         "title_original": title_original,
         "category": category,
         "commentary": commentary,
+        "source": source,
         "timestamp": safe(time.time()),
     }
 
@@ -279,6 +430,15 @@ def main():
         f"scan={STUCK_SCAN_INTERVAL_SEC}s).",
         flush=True,
     )
+    if REVIEW_ENABLED:
+        print(
+            f"{TAG} → revisão editorial ATIVA (verificador de fatos + revisor "
+            f"editorial + aprovador final; até {MAX_CORRECTION_ATTEMPTS} "
+            f"correções, depois descarta).",
+            flush=True,
+        )
+    else:
+        print(f"{TAG} → revisão editorial DESLIGADA (ENABLE_EDITORIAL_REVIEW=false).", flush=True)
 
     while True:
         try:

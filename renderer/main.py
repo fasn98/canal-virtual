@@ -1,8 +1,8 @@
 import time
+import datetime
 import redis
 import subprocess
 import os
-import json
 
 # Conexão estável com Redis
 r = redis.Redis(host="redis", port=6379, decode_responses=True, socket_timeout=10)
@@ -68,6 +68,40 @@ LOWERTHIRD_IMG = f"{ASSETS_DIR}/lowerthird.png"
 DUMMY_AUDIO = f"{ASSETS_DIR}/news_audio.wav"
 TICKER_IMG = f"{TICKER_DIR}/ticker.png"
 
+# --- TV virtual (b-roll temático no cenário) ---
+# Moldura com a "tela" recortada (transparente). Dentro dela roda, em loop, um
+# vídeo genérico do Pexels relacionado à CATEGORIA da notícia principal do
+# bloco atual — 1 vídeo por bloco de NEWS_PER_PROMO notícias reais. Toda a
+# lógica de busca/cache/fallback vive em renderer/tvbroll.py; aqui só ficam a
+# geometria da moldura e o controle de "qual vídeo vale para este bloco".
+# ENABLE_TV=false desliga tudo (composição idêntica à de hoje).
+ENABLE_TV = os.environ.get("ENABLE_TV", "true").strip().lower() in (
+    "1", "true", "yes", "on",
+)
+TV_FRAME_IMG = f"{ASSETS_DIR}/tv_frame.png"
+# Geometria de tv_frame.png (520x340). O bezel opaco ocupa as 4 bordas; a área
+# transparente da "tela" vai de x:[24..496] y:[24..316] no PNG. Damos 2 px de
+# sangria (DX/DY=22, W=477, H=297) para o bezel cobrir a borda serrilhada do
+# vídeo — sem isso aparece um fio da imagem por baixo da moldura.
+TV_FRAME_W, TV_FRAME_H = 520, 340
+TV_SCREEN_DX, TV_SCREEN_DY = 22, 22
+TV_SCREEN_W, TV_SCREEN_H = 477, 297
+# Canto superior esquerdo da moldura na composição 1920x1080. Lado esquerdo,
+# abaixo do logo (que termina ~y=113), à esquerda da apresentadora (x>=940) e
+# acima do lower third (y>=800). Ajustável por env sem rebuild.
+TV_X = int(os.environ.get("TV_X", "60"))
+TV_Y = int(os.environ.get("TV_Y", "180"))
+# Índices das entradas extras do ffmpeg quando há TV (ver montagem do cmd):
+# 0=fundo 1=avatar 2=logo 3=lowerthird 4=ticker 5=áudio  6=vídeo TV  7=moldura.
+TV_VIDEO_IDX, TV_FRAME_IDX = 6, 7
+
+# Um vídeo de b-roll por BLOCO. NEWS_PER_PROMO (mesmo valor do promoter)
+# define o tamanho do bloco; o contador vive no Redis e sobrevive a restart.
+NEWS_PER_PROMO = int(os.environ.get("NEWS_PER_PROMO", "5"))
+TV_BLOCK_POS_KEY = "tv:block_pos"
+TV_CURRENT_VIDEO_KEY = "tv:current_video"
+TV_CURRENT_CATEGORY_KEY = "tv:current_category"
+
 # Destinos Finais
 final_file = f"{OUTPUT_DIR}/final.mp4"
 final_temp = f"{OUTPUT_DIR}/final_temp.mp4"
@@ -102,6 +136,30 @@ LT_BOX_CENTER_Y = 901                     # centro vertical da faixa visível
 # títulos em PT (mistura maiúsc/minúsc + acentos). Conservador de propósito:
 # erra para quebrar/reduzir antes de vazar.
 LT_GLYPH_RATIO = 0.55
+
+# --- Lower third do bloco PROMOCIONAL (category == "Promoção") ---
+# São duas linhas dentro da MESMA caixa do lowerthird.png: o @ do canal
+# (linha principal, maior) e, logo abaixo, o selo de call-to-action (menor).
+# Antes o texto começava em x=60 (à esquerda da caixa, cujo interior começa
+# em ~200) e o bloco ficava baixo demais — visualmente descolado da faixa.
+# Agora as duas linhas se alinham à mesma borda interna das manchetes
+# (LT_TEXT_X) e o conjunto fica centralizado na altura da faixa
+# (LT_BOX_CENTER_Y), exatamente como o layout de notícia.
+PROMO_LT_FONTSIZE = 46
+PROMO_SEAL_FONTSIZE = 26
+_PROMO_MAIN_LINE_H = int(PROMO_LT_FONTSIZE * 1.25)
+_PROMO_SEAL_LINE_H = int(PROMO_SEAL_FONTSIZE * 1.25)
+# Ajuste óptico fino: medindo um frame renderizado, o bloco centrado só pela
+# métrica de linha ainda sobra ~6 px para cima dentro da faixa (folga de
+# ~17 px acima do @ contra ~28 px abaixo do selo). Empurra 6 px para baixo
+# para as folgas ficarem simétricas.
+PROMO_LT_Y_OFFSET = 6
+# y (topo) da linha principal: sobe o bloco de 2 linhas até ele ficar
+# centrado em LT_BOX_CENTER_Y. O selo vem uma altura de linha abaixo.
+PROMO_LT_MAIN_Y = int(
+    LT_BOX_CENTER_Y - (_PROMO_MAIN_LINE_H + _PROMO_SEAL_LINE_H) / 2
+) + PROMO_LT_Y_OFFSET
+PROMO_SEAL_Y = PROMO_LT_MAIN_Y + _PROMO_MAIN_LINE_H
 
 
 def _approx_text_width(text, fontsize):
@@ -184,6 +242,83 @@ def build_ticker_text(current_title, current_category):
         return f"{current_category.upper()}  •  {current_title}"
 
 
+def _tv_current_or_none():
+    """Lê o vídeo já escolhido para o bloco atual (Redis) e confirma que o
+    arquivo existe em disco. Usado no meio do bloco e nos blocos promocionais
+    (que não abrem bloco novo)."""
+    if not ENABLE_TV:
+        return None
+    try:
+        path = r.get(TV_CURRENT_VIDEO_KEY)
+    except Exception:
+        return None
+    if path and os.path.exists(path) and os.path.getsize(path) > 0:
+        return path
+    return None
+
+
+def get_block_tv_video(is_promo, category, news_id, title=None):
+    """Decide qual vídeo de b-roll a TV mostra neste render.
+
+    Regra: 1 vídeo por BLOCO de NEWS_PER_PROMO notícias reais.
+      - 1ª notícia real do bloco  -> busca um b-roll para a notícia dela
+        (renderer/tvbroll.py: 1º o nosso canal no YouTube pela categoria +
+        título, senão Pexels pela categoria), grava a escolha no Redis e usa;
+      - 2ª..Nª notícia do bloco   -> reusa a escolha gravada;
+      - bloco promocional          -> reusa a escolha do bloco (continuidade),
+        sem mexer no contador.
+
+    Qualquer falha -> None e o renderer compõe o bloco SEM a TV, como antes.
+    O contador `tv:block_pos` vive no Redis (sobrevive a restart) e se
+    realinha sozinho ao ciclo do promoter a cada NEWS_PER_PROMO."""
+    if not ENABLE_TV:
+        return None
+
+    if is_promo:
+        return _tv_current_or_none()
+
+    try:
+        pos = r.incr(TV_BLOCK_POS_KEY)
+    except Exception as e:
+        print(f"{TAG} → AVISO: contador de bloco da TV falhou ({e}).", flush=True)
+        return _tv_current_or_none()
+
+    if pos >= NEWS_PER_PROMO:
+        # A próxima notícia real reinicia o ciclo (alinhado ao promoter).
+        try:
+            r.set(TV_BLOCK_POS_KEY, 0)
+        except Exception:
+            pass
+
+    if pos != 1:
+        return _tv_current_or_none()
+
+    # 1ª notícia real do bloco: escolhe um vídeo novo para a notícia dela.
+    print(
+        f"{TAG} → novo bloco da TV (1ª notícia: {category!r} / {title!r}); "
+        "buscando b-roll (canal YouTube -> Pexels).",
+        flush=True,
+    )
+    path = None
+    try:
+        from tvbroll import get_broll_video
+        path = get_broll_video(category, title)
+    except Exception as e:
+        print(f"{TAG} → AVISO: busca de b-roll falhou ({e}); bloco sem TV.", flush=True)
+        path = None
+
+    try:
+        if path:
+            r.set(TV_CURRENT_VIDEO_KEY, path)
+            r.set(TV_CURRENT_CATEGORY_KEY, category or "")
+        else:
+            r.delete(TV_CURRENT_VIDEO_KEY)
+            r.delete(TV_CURRENT_CATEGORY_KEY)
+    except Exception:
+        pass
+    return path
+
+
 def handle_event(event_id, data):
     """Processa UMA mensagem. Usado tanto pelo XREADGROUP (mensagens novas)
     quanto pelo XAUTOCLAIM (mensagens travadas recuperadas). Levanta exceção
@@ -193,6 +328,24 @@ def handle_event(event_id, data):
     category = data.get("category", "Geral")
     text = data.get("commentary", "")
     news_id = data.get("id", "0")
+
+    # Freio de gasto diário da ElevenLabs (marcado pelo synthesizer). Quando o
+    # orçamento do dia esgotou, NÃO renderizamos bloco novo para este item e
+    # NÃO usamos o áudio dummy: apenas confirmamos a mensagem e seguimos, sem
+    # tocar no final.mp4. O streamer continua transmitindo o último bloco bom
+    # em loop até o contador virar amanhã (ou até uma notícia curta caber no
+    # que sobrou do orçamento).
+    budget_exceeded = str(data.get("budget_exceeded", "")).strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+    if budget_exceeded:
+        print(
+            f"{TAG} → Orçamento diário esgotado, pulando {news_id}, "
+            f"mantendo conteúdo atual no ar",
+            flush=True,
+        )
+        r.xack(INPUT_STREAM, GROUP, event_id)
+        return
 
     # Usa o áudio real gerado pelo synthesizer (TTS) quando disponível;
     # cai para o áudio fixo apenas se o TTS falhou ou não veio preenchido.
@@ -205,7 +358,13 @@ def handle_event(event_id, data):
         AUDIO_FILE = DUMMY_AUDIO
 
     tipo = "CHAMADA PROMO" if category.strip().lower() in ("promoção", "promocao", "promo") else "Notícia"
-    print(f"{TAG} → Processando {tipo} ID {news_id}: {title}")
+    # Reprise: item republicado pelo synthesizer porque o orçamento do dia
+    # esgotou. Áudio já pago (cai no cache), só o ffmpeg local remonta o vídeo.
+    is_reprise = str(data.get("reprise", "")).strip().lower() in ("1", "true", "yes", "on")
+    print(
+        f"{TAG} → Processando {tipo} ID {news_id}: {title}"
+        + (" [REPRISE — orçamento esgotado, áudio já pago]" if is_reprise else "")
+    )
 
     # Lip-sync opcional: só quando ligado e quando há áudio real (mp3) do
     # synthesizer — nunca para o áudio de fallback. Em falha, `lipsync_video`
@@ -224,17 +383,32 @@ def handle_event(event_id, data):
     # third (vira o @ do canal), o texto do ticker e um selo sutil "INSCREVA-SE".
     is_promo = category.strip().lower() in ("promoção", "promocao", "promo")
 
+    # TV virtual: 1 vídeo de b-roll por bloco (ver get_block_tv_video). Em
+    # qualquer falha tv_video fica None e a composição roda sem a TV, igual a hoje.
+    tv_video = None
+    try:
+        tv_video = get_block_tv_video(is_promo, category, news_id, title)
+    except Exception as e:
+        print(f"{TAG} → AVISO: TV virtual indisponível ({e}); bloco sem TV.", flush=True)
+    if tv_video:
+        print(f"{TAG} → TV virtual: {tv_video}", flush=True)
+
     PROMO_LOWERTHIRD = "youtube.com/@FutureVerse-Beyond"
     PROMO_TICKER = (
         "INSCREVA-SE • FUTUREVERSE & BEYOND • +3000 VÍDEOS • CIÊNCIA • "
-        "TECNOLOGIA • ASTRONOMIA • AVIAÇÃO • GEOPOLÍTICA • INSCREVA-SE"
+        "TECNOLOGIA • ASTRONOMIA • AVIAÇÃO • GEOPOLÍTICA • E ALÉM • INSCREVA-SE"
     )
 
     # Escreve a manchete (lower third) e o texto do ticker em arquivos
     # temporários — evita todo problema de aspas/apóstrofos no filtro do ffmpeg.
     if is_promo:
-        # Bloco promocional: @ do canal, curto e fixo — layout inalterado.
-        lowerthird_text, lt_x, lt_fontsize, lt_y = PROMO_LOWERTHIRD, "60", "50", "864"
+        # Bloco promocional: @ do canal alinhado à MESMA borda interna das
+        # manchetes (LT_TEXT_X) e centralizado na altura da faixa. O selo
+        # (INSCREVA-SE • ...) sai logo abaixo, no mesmo x — ver PROMO_SEAL_Y.
+        lowerthird_text = PROMO_LOWERTHIRD
+        lt_x = str(LT_TEXT_X)
+        lt_fontsize = str(PROMO_LT_FONTSIZE)
+        lt_y = str(PROMO_LT_MAIN_Y)
         ticker_text = PROMO_TICKER
     else:
         # Manchete: quebra/reduz e posiciona DENTRO da caixa do lowerthird.png.
@@ -275,18 +449,36 @@ def handle_event(event_id, data):
     else:
         avatar_filter = "[1:v]scale=410:574[av];"
 
-    # COMPOSIÇÃO DO ESTÚDIO: fundo + apresentador + logo + lower third + ticker rolante
+    # COMPOSIÇÃO DO ESTÚDIO: fundo + [TV] + apresentador + logo + lower third + ticker rolante
     filter_parts = [
         # Fundo quase-16:9 (1672x941): escala cobrindo o frame e corta o excedente
         # sub-pixel. Sem distorção e sem tarjas — melhor que o scale=1920:1080 puro.
         "[0:v]scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,setsar=1[bg];",
+    ]
+
+    # TV virtual: o vídeo do Pexels entra ATRÁS da moldura (a moldura faz de
+    # "vidro"), e o conjunto vídeo+moldura fica ACIMA do fundo do estúdio mas
+    # ABAIXO dos demais gráficos/apresentadora. O vídeo é escalado com
+    # cobertura + crop para preencher exatamente o recorte transparente da tela.
+    bg_label = "bg"
+    if tv_video:
+        filter_parts += [
+            f"[{TV_VIDEO_IDX}:v]scale={TV_SCREEN_W}:{TV_SCREEN_H}:force_original_aspect_ratio=increase,"
+            f"crop={TV_SCREEN_W}:{TV_SCREEN_H},setsar=1[tv];",
+            f"[bg][tv]overlay={TV_X + TV_SCREEN_DX}:{TV_Y + TV_SCREEN_DY}[bgtv];",
+            f"[{TV_FRAME_IDX}:v]scale={TV_FRAME_W}:{TV_FRAME_H}[tvf];",
+            f"[bgtv][tvf]overlay={TV_X}:{TV_Y}[bgtv2];",
+        ]
+        bg_label = "bgtv2"
+
+    filter_parts += [
         # Recorte da apresentadora (transparente na imagem estática; verde removido
         # por chroma key no vídeo do D-ID). Sem retângulo opaco ela vem maior e
         # mais à frente, sentada na poltrona central-direita da cena nova.
         avatar_filter,
         # base (mãos/braços, onde o recorte tem a borda reta) fica escondida
         # atrás do lower third (y>=800).
-        "[bg][av]overlay=940:305[bg1];",
+        f"[{bg_label}][av]overlay=940:305[bg1];",
         f"[2:v]scale={logo_scale}[lg];",
         f"[bg1][lg]overlay={logo_xy}[bg2];",
         "[3:v]scale=1920:200[lt];",
@@ -299,9 +491,11 @@ def handle_event(event_id, data):
     last_label = "bg5"
     if is_promo:
         # Selo sutil logo abaixo do @ do canal: chama a ação sem destacar demais.
+        # Mesmo x da linha principal (LT_TEXT_X) e y logo abaixo dela, para o
+        # conjunto ficar contido e centrado na caixa do lowerthird.png.
         filter_parts.append(
-            "[bg5]drawtext=text='INSCREVA-SE  •  DEIXE SEU LIKE  •  ATIVE O SININHO':"
-            "fontcolor=0x00E0FF:fontsize=28:x=62:y=930[bg6];"
+            f"[bg5]drawtext=text='INSCREVA-SE  •  DEIXE SEU LIKE  •  ATIVE O SININHO':"
+            f"fontcolor=0x00E0FF:fontsize={PROMO_SEAL_FONTSIZE}:x={LT_TEXT_X}:y={PROMO_SEAL_Y}[bg6];"
         )
         last_label = "bg6"
 
@@ -321,6 +515,16 @@ def handle_event(event_id, data):
     else:
         avatar_input = ["-loop", "1", "-i", AVATAR_IMG]
 
+    # Entradas 6 (vídeo da TV, em loop infinito) e 7 (moldura). Só entram
+    # quando há b-roll para o bloco; sem elas o cmd é idêntico ao de hoje.
+    # O -shortest lá embaixo corta tudo na duração do áudio.
+    tv_inputs = []
+    if tv_video:
+        tv_inputs = [
+            "-stream_loop", "-1", "-i", tv_video,
+            "-loop", "1", "-i", TV_FRAME_IMG,
+        ]
+
     cmd = [
         "ffmpeg", "-y",
         "-loop", "1", "-i", BACKGROUND_IMG,
@@ -329,6 +533,7 @@ def handle_event(event_id, data):
         "-loop", "1", "-i", LOWERTHIRD_IMG,
         "-loop", "1", "-i", TICKER_IMG,
         "-i", AUDIO_FILE,
+        *tv_inputs,
         "-filter_complex", filter_complex,
         "-map", "[vout]",
         "-map", "5:a",
@@ -359,6 +564,17 @@ def handle_event(event_id, data):
     os.replace(final_temp, final_file)
     os.chmod(final_file, 0o777)
     print(f"{TAG} → SUCESSO EMISSÃO: {final_file} gerado com sucesso!")
+
+    # Marca da última emissão bem-sucedida, lida pela metrics-api
+    # (GET /status/pipeline). Best-effort: nunca quebra a entrega do bloco.
+    try:
+        r.set(
+            "metrics:renderer:last_emission",
+            datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+            ex=30 * 24 * 3600,
+        )
+    except Exception:
+        pass
 
     block = {
         "id": news_id,
@@ -448,6 +664,21 @@ def main():
     print(
         f"{TAG} → lip-sync (D-ID): {'ATIVADO' if ENABLE_LIPSYNC else 'desativado'} "
         f"(ENABLE_LIPSYNC={os.environ.get('ENABLE_LIPSYNC', 'false')}).",
+        flush=True,
+    )
+    _yt_key = os.environ.get("YOUTUBE_API_KEY", "").strip()
+    _yt_on = os.environ.get("ENABLE_TV_YOUTUBE", "true").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+    _tv_src = (
+        f"canal YouTube ({os.environ.get('YOUTUBE_CHANNEL_HANDLE', '@FutureVerse-Beyond')}) "
+        "-> Pexels" if (_yt_on and _yt_key) else "Pexels"
+    )
+    print(
+        f"{TAG} → TV virtual (b-roll): "
+        f"{'ATIVADA' if ENABLE_TV else 'desativada'} "
+        f"(ENABLE_TV={os.environ.get('ENABLE_TV', 'true')}, fonte: {_tv_src}, "
+        f"1 vídeo a cada {NEWS_PER_PROMO} notícias, pos={TV_X},{TV_Y}).",
         flush=True,
     )
     print(

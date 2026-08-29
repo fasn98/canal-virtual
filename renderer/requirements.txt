@@ -1,3 +1,6 @@
 redis
 requests
 minio
+# TV virtual (fonte 1): baixa sob demanda 1 vídeo do nosso canal no YouTube.
+# Sem pin: extrator do YouTube muda com frequência, versão mais nova é a boa.
+yt-dlp

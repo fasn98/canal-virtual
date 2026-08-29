@@ -1,1 +1,4 @@
 redis
+# Bot de engajamento: gera a pergunta do chat via Claude. As chamadas ao
+# YouTube (OAuth + liveChatMessages.insert) usam só a biblioteca padrão.
+anthropic

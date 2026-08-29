@@ -39,12 +39,32 @@ Referência da API (docs.d-id.com, conferida em 2026-08):
 """
 
 import base64
+import datetime
 import os
 import time
 
+import redis
 import requests
 
 TAG = "D-ID"
+
+# --- Contador para a metrics-api (best-effort) ----------------------------
+# Cada chamada REAL ao D-ID (não cache) incrementa
+# `metrics:did_calls:success:<data>` ou `:fail:<data>`, lido pela metrics-api
+# (GET /status/did). Redis próprio; qualquer falha aqui é ignorada.
+_metrics_r = redis.Redis(
+    host="redis", port=6379, decode_responses=True, socket_timeout=5
+)
+_METRICS_TTL_SEC = 8 * 24 * 3600
+
+
+def _bump_metric(field, n=1):
+    try:
+        key = f"metrics:{field}:{datetime.date.today().isoformat()}"
+        _metrics_r.incrby(key, n)
+        _metrics_r.expire(key, _METRICS_TTL_SEC)
+    except Exception:
+        pass
 
 # --- Configuração (tudo via env, sem rebuild) ---
 ENABLE_LIPSYNC = os.environ.get("ENABLE_LIPSYNC", "false").strip().lower() in (
@@ -200,6 +220,7 @@ def get_lipsync_video(news_id, audio_path):
         talk_id = _create_talk(image_url, audio_url)
         result_url, duration = _poll_talk(talk_id)
         _download(result_url, out_path)
+        _bump_metric("did_calls:success")
         dur_txt = f"{float(duration):.1f}" if duration is not None else "?"
         print(
             f"{TAG} → Vídeo com lip-sync gerado para {news_id}, duração {dur_txt} segundos "
@@ -208,6 +229,7 @@ def get_lipsync_video(news_id, audio_path):
         )
         return out_path
     except Exception as e:
+        _bump_metric("did_calls:fail")
         # Limpa qualquer mp4 parcial para não envenenar o cache.
         for p in (out_path, out_path + ".part"):
             try:

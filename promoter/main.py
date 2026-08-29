@@ -1,6 +1,5 @@
 import os
 import time
-import uuid
 
 import redis
 
@@ -24,13 +23,22 @@ COUNTER_KEY = "promo:real_news_count"
 # Produção = 5 (5x ~2min + 1 promo ≈ ciclo de ~11 min).
 NEWS_PER_PROMO = int(os.environ.get("NEWS_PER_PROMO", "5"))
 
+# ID FIXO da chamada promocional. Como o texto (áudio) nunca muda entre
+# execuções, um id estável faz o synthesizer (mp3 em disco) e o lip-sync
+# (mp4 D-ID) baterem no cache a partir da 2ª vez — 0 crédito ElevenLabs /
+# D-ID por promoção. Para forçar UMA regeração (mudou o roteiro), suba o
+# sufixo de versão: v1 -> v2 -> v3 ... O id novo é cache miss uma única vez
+# e depois volta a ser reaproveitado para sempre.
+PROMO_ID = "promo-futureverse-beyond-v3"
 PROMO_TITLE = "Inscreva-se: FutureVerse & Beyond"
 PROMO_CATEGORY = "Promoção"
 PROMO_COMMENTARY = (
     "Se você gosta do que vê aqui, vai adorar o canal FutureVerse & Beyond. "
-    "São mais de três mil vídeos sobre ciência, tecnologia, astronomia, aviação "
-    "e geopolítica. Inscreva-se, deixe seu like, e faça parte dessa comunidade "
-    "que já é referência em conteúdo de qualidade. O link está na tela."
+    "São mais de três mil vídeos sobre ciência, tecnologia, astronomia, aviação, "
+    "geopolítica e além. Inscreva-se, deixe seu like, e faça parte dessa comunidade "
+    "que já é referência em conteúdo de qualidade. E fica de olho no nosso chat ao "
+    "vivo: a cada bloco a gente solta uma pergunta pra você responder e participar "
+    "das enquetes e quizzes com a gente, ao vivo. O link está na tela."
 )
 
 
@@ -54,7 +62,7 @@ def ensure_group():
 def publish_promo():
     now = time.time()
     promo = {
-        "id": f"promo-{int(now)}-{uuid.uuid4().hex[:8]}",
+        "id": PROMO_ID,
         "title": PROMO_TITLE,
         "title_original": "",
         "category": PROMO_CATEGORY,
@@ -84,6 +92,26 @@ def handle_event(event_id, data):
         r.set(COUNTER_KEY, 0)
         print(f"{TAG} → contador zerado; novo ciclo começa agora.", flush=True)
 
+        # Bot de engajamento: 1 pergunta no chat ao vivo por BLOCO, sobre a
+        # notícia que acabou de fechar o ciclo (a mais recente — "a notícia do
+        # momento"). Best-effort e isolado: maybe_post_block_question captura
+        # qualquer erro internamente e NUNCA quebra o pipeline promocional.
+        try:
+            from engage import maybe_post_block_question
+
+            maybe_post_block_question(
+                r,
+                news_id=data.get("id", ""),
+                title=title,
+                category=category,
+                summary=data.get("text", ""),
+            )
+        except Exception as e:
+            print(
+                f"{TAG} → engage indisponível ({type(e).__name__}: {e}); segue.",
+                flush=True,
+            )
+
     # XACK só depois de contar/disparar. Se o container morrer entre o INCR e o
     # XACK, a mensagem é reentregue e contada de novo — impacto pequeno (a promo
     # dispara no máximo uma notícia adiantada/atrasada), aceitável aqui.
@@ -105,6 +133,17 @@ def main():
         f"{r.get(COUNTER_KEY) or 0}.",
         flush=True,
     )
+    try:
+        from engage import ENABLED as ENGAGE_ENABLED
+
+        print(
+            f"{TAG} → bot de engajamento no chat ao vivo: "
+            f"{'ATIVADO' if ENGAGE_ENABLED else 'desativado'} "
+            f"(ENABLE_ENGAGEMENT_BOT). 1 pergunta por bloco.",
+            flush=True,
+        )
+    except Exception as e:
+        print(f"{TAG} → módulo engage não carregou ({type(e).__name__}: {e}).", flush=True)
 
     while True:
         try:

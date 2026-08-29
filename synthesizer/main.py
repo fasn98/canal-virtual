@@ -1,5 +1,6 @@
 import time
 import os
+import datetime
 import redis
 import json
 import requests
@@ -27,6 +28,71 @@ ELEVENLABS_MODEL_ID = os.environ.get("ELEVENLABS_MODEL_ID", "eleven_multilingual
 AUDIO_DIR = "/app/assets/audio"
 os.makedirs(AUDIO_DIR, exist_ok=True)
 
+# --- Freio de gasto diário na ElevenLabs -------------------------------------
+# Teto de créditos/dia para a síntese de voz de NOVAS notícias, INDEPENDENTE de
+# quantas fontes de notícia estejam ativas. Plano Creator = 121.038 créditos/mês
+# / 30 ≈ 4.034/dia; o padrão 4000 embute uma margem de segurança. No modelo
+# multilingual v2 (o que usamos) 1 caractere enviado ≈ 1 crédito.
+DAILY_CREDIT_BUDGET = int(os.environ.get("DAILY_CREDIT_BUDGET", "4000"))
+
+# Contador de gasto do dia no Redis. A chave já muda de nome por data, então o
+# reset diário é natural; o TTL só evita que chaves de dias antigos acumulem
+# para sempre.
+CREDITS_USED_KEY_PREFIX = "elevenlabs:credits_used:"
+CREDITS_KEY_TTL_SEC = 7 * 24 * 3600
+
+
+def _today_key():
+    return CREDITS_USED_KEY_PREFIX + datetime.date.today().isoformat()
+
+
+def get_credits_used_today():
+    """Créditos ElevenLabs já gastos hoje (0 se a chave não existe ou o Redis
+    falhou — nesse caso preferimos deixar passar a travar o canal)."""
+    try:
+        v = r.get(_today_key())
+        return int(v) if v else 0
+    except Exception as e:
+        print(f"{TAG} → AVISO: falha ao ler contador de créditos ({e}); assumindo 0.", flush=True)
+        return 0
+
+
+def add_credits_used(chars):
+    """Soma `chars` ao contador do dia e renova o TTL. Retorna o novo total
+    (ou None em falha)."""
+    try:
+        key = _today_key()
+        total = r.incrby(key, chars)
+        r.expire(key, CREDITS_KEY_TTL_SEC)
+        return total
+    except Exception as e:
+        print(f"{TAG} → AVISO: falha ao atualizar contador de créditos ({e}).", flush=True)
+        return None
+
+
+def log_budget(used):
+    remaining = DAILY_CREDIT_BUDGET - used
+    print(
+        f"{TAG} → Orçamento diário: {used}/{DAILY_CREDIT_BUDGET} créditos "
+        f"({remaining} restantes)",
+        flush=True,
+    )
+
+
+# --- Contadores para a metrics-api (best-effort) ---------------------------
+# Chaves `metrics:<campo>:<data>` lidas pelo serviço metrics-api. Nunca
+# interferem no fluxo: qualquer falha de Redis é engolida.
+METRICS_TTL_SEC = 8 * 24 * 3600
+
+
+def bump_metric(field, n=1):
+    try:
+        key = f"metrics:{field}:{datetime.date.today().isoformat()}"
+        r.incrby(key, n)
+        r.expire(key, METRICS_TTL_SEC)
+    except Exception:
+        pass
+
 
 def safe(v):
     if v is None:
@@ -34,19 +100,140 @@ def safe(v):
     return str(v)
 
 
-def synthesize_audio(text, news_id):
+# --- Índice de notícias "completas" de hoje (para reprises sem custo) --------
+# Toda notícia que JÁ tem áudio real pago (gerado agora OU cache HIT) entra num
+# Hash Redis por data: field = id, value = JSON com o que o renderer precisa
+# para remontar o bloco (título, categoria, comentário, caminho do áudio).
+# Quando o orçamento do dia esgota, em vez de simplesmente pular, o synthesizer
+# republica em ROTAÇÃO uma dessas notícias em news.ready — o renderer remonta o
+# vídeo com ffmpeg local, sem tocar na ElevenLabs nem no D-ID (o audio_file já
+# existe e cai no cache). A chave muda de nome por data (reset diário natural)
+# e tem TTL curto só para não acumular chaves de dias antigos.
+COMPLETED_ITEMS_KEY_PREFIX = "today:completed_items:"
+COMPLETED_ITEMS_TTL_SEC = 2 * 24 * 3600
+# Ponteiro de rotação (round-robin) das reprises, também por data.
+REPRISE_POS_KEY_PREFIX = "synthesizer:reprise_pos:"
+
+
+def _completed_key():
+    return COMPLETED_ITEMS_KEY_PREFIX + datetime.date.today().isoformat()
+
+
+def record_completed_item(item):
+    """Indexa uma notícia que já tem áudio real pago, para poder reprisá-la de
+    graça mais tarde (ver pick_reprise_item). Best-effort: qualquer falha de
+    Redis é só logada, nunca interrompe o fluxo."""
+    news_id = safe(item.get("id"))
+    if not news_id:
+        return
+    try:
+        payload = json.dumps(
+            {
+                "id": news_id,
+                "title": safe(item.get("title")),
+                "title_original": safe(item.get("title_original")),
+                "category": safe(item.get("category")),
+                "commentary": safe(item.get("commentary")),
+                "source": safe(item.get("source")),
+                "audio_file": safe(item.get("audio_file")),
+            },
+            ensure_ascii=False,
+        )
+        key = _completed_key()
+        r.hset(key, news_id, payload)
+        r.expire(key, COMPLETED_ITEMS_TTL_SEC)
+    except Exception as e:
+        print(f"{TAG} → AVISO: falha ao indexar notícia completa {news_id} ({e}).", flush=True)
+
+
+def pick_reprise_item():
+    """Escolhe, em rotação simples (round-robin sobre os ids ordenados), uma
+    notícia já paga de hoje para reprisar sem gastar crédito novo. Retorna o
+    dict do item ou None se ainda não há NENHUMA notícia completa hoje (cenário
+    raro, bem cedo no dia). Com 2+ itens no índice, a rotação nunca repete o
+    mesmo item duas vezes seguidas."""
+    try:
+        key = _completed_key()
+        ids = sorted(r.hkeys(key))
+    except Exception as e:
+        print(f"{TAG} → AVISO: falha ao ler índice de notícias completas ({e}).", flush=True)
+        return None
+    if not ids:
+        return None
+    try:
+        pos_key = REPRISE_POS_KEY_PREFIX + datetime.date.today().isoformat()
+        pos = r.incr(pos_key)
+        r.expire(pos_key, COMPLETED_ITEMS_TTL_SEC)
+    except Exception:
+        pos = 0
+    chosen_id = ids[pos % len(ids)]
+    try:
+        raw = r.hget(key, chosen_id)
+        return json.loads(raw) if raw else None
+    except Exception as e:
+        print(f"{TAG} → AVISO: falha ao carregar notícia {chosen_id} para reprise ({e}).", flush=True)
+        return None
+
+
+def synthesize_audio(text, news_id, is_promo=False):
     """
     Gera o áudio real da notícia via ElevenLabs TTS.
-    Retorna o caminho do arquivo gerado, ou "" em caso de falha
-    (o renderer usa um áudio padrão como fallback quando recebe "").
+    Retorna uma tupla (audio_path, budget_exceeded):
+      - audio_path  = caminho do mp3 gerado, ou "" quando não há áudio real
+        (o renderer usa um áudio padrão como fallback quando recebe "");
+      - budget_exceeded = True quando NÃO chamamos a ElevenLabs porque o
+        orçamento diário de créditos acabaria — nesse caso o renderer PULA o
+        item em vez de usar o fallback (ver renderer/main.py).
     """
     if not text.strip():
         print(f"{TAG} → Texto vazio para {news_id}, pulando TTS.")
-        return ""
+        return "", False
+
+    out_path = os.path.join(AUDIO_DIR, f"{news_id}.mp3")
+
+    # Cache por id: se já existe um mp3 não-vazio para esta notícia, reusa
+    # direto sem chamar a ElevenLabs (economia de créditos). O id vem do
+    # collector e é estável; áudio de notícia antiga não muda, então sem TTL.
+    # Cobre o re-processamento do mesmo id quando o collector re-publica o
+    # feed após restart (dedupe dele é só em memória). Cache não gasta
+    # orçamento nem sofre o freio.
+    if news_id and os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+        print(
+            f"{TAG} → Cache HIT para {news_id}, reaproveitando audio existente",
+            flush=True,
+        )
+        bump_metric("cache:audio:hit")
+        return out_path, False
+
+    # Passou do cache: vai ser preciso sintetizar (ou barrar pelo freio) — conta
+    # como MISS para a taxa de cache do painel.
+    if news_id:
+        bump_metric("cache:audio:miss")
 
     if not ELEVENLABS_API_KEY or not ELEVENLABS_VOICE_ID:
         print(f"{TAG} → ELEVENLABS_API_KEY/VOICE_ID não configurados. Usando fallback.")
-        return ""
+        return "", False
+
+    # --- Freio de gasto diário --------------------------------------------
+    # 1 caractere ≈ 1 crédito (multilingual v2). Antes de CADA chamada, checa
+    # se (uso de hoje + tamanho deste texto) passaria do teto. Se passaria,
+    # nem chamamos a API — poupamos o round-trip de uma chamada que sabemos
+    # que falharia por cota, e sinalizamos budget_exceeded para o renderer.
+    # Blocos promocionais NÃO entram no freio: a chamada do canal irmão não
+    # pode sumir do ar por causa da cota (e o id fixo dela já bate no cache a
+    # partir da 2ª vez). O gasto real dela ainda é contabilizado no total.
+    char_cost = len(text)
+    if not is_promo:
+        used = get_credits_used_today()
+        if used + char_cost > DAILY_CREDIT_BUDGET:
+            print(
+                f"{TAG} → ORÇAMENTO DIÁRIO ESGOTADO: {used} usados + {char_cost} desta "
+                f"chamada passaria de {DAILY_CREDIT_BUDGET}. NÃO vou chamar a ElevenLabs "
+                f"para {news_id}.",
+                flush=True,
+            )
+            log_budget(used)
+            return "", True
 
     url = f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVENLABS_VOICE_ID}"
     headers = {
@@ -63,14 +250,12 @@ def synthesize_audio(text, news_id):
         },
     }
 
-    out_path = os.path.join(AUDIO_DIR, f"{news_id}.mp3")
-
     try:
         resp = requests.post(url, headers=headers, json=payload, timeout=30)
 
         if resp.status_code != 200:
             print(f"{TAG} → ERRO ElevenLabs (id={news_id}, status={resp.status_code}): {resp.text}")
-            return ""
+            return "", False
 
         with open(out_path, "wb") as f:
             f.write(resp.content)
@@ -78,14 +263,20 @@ def synthesize_audio(text, news_id):
         if os.path.getsize(out_path) == 0:
             print(f"{TAG} → Arquivo de áudio vazio para {news_id}.")
             os.remove(out_path)
-            return ""
+            return "", False
+
+        # Só contabiliza o gasto depois de confirmar mp3 válido em disco
+        # ("cada chamada bem-sucedida"). INCRBY é atômico; concorrência entre
+        # múltiplos consumers pode estourar o teto por no máx. ~1 chamada.
+        total = add_credits_used(char_cost)
+        log_budget(total if total is not None else get_credits_used_today())
 
         print(f"{TAG} → Áudio gerado: {out_path}")
-        return out_path
+        return out_path, False
 
     except requests.exceptions.RequestException as e:
         print(f"{TAG} → ERRO DE CONEXÃO ElevenLabs (id={news_id}):", e)
-        return ""
+        return "", False
 
 
 def ensure_group():
@@ -107,17 +298,60 @@ def handle_event(event_id, data):
     em caso de falha — nesse caso NÃO há XACK e a mensagem segue pendente."""
     news_id = safe(data.get("id"))
     commentary = safe(data.get("commentary"))
+    category = safe(data.get("category"))
+    is_promo = category.strip().lower() in ("promoção", "promocao", "promo")
 
-    # Gera o áudio (grava em disco antes de retornar o caminho).
-    audio_file = synthesize_audio(commentary, news_id)
+    # Gera o áudio (grava em disco antes de retornar o caminho). budget_exceeded
+    # = True quando o freio de gasto diário barrou a chamada; nesse caso o
+    # renderer pula o item e mantém o último bloco bom no ar.
+    audio_file, budget_exceeded = synthesize_audio(commentary, news_id, is_promo=is_promo)
+
+    # --- Orçamento esgotado: em vez de só pular, reprisa em rotação uma notícia
+    # de hoje que JÁ tem áudio real pago (republica em news.ready sem novo gasto
+    # de ElevenLabs/D-ID — o audio_file já existe e o renderer cai no cache).
+    # Só se ainda não houver NENHUMA notícia completa hoje é que caímos no
+    # comportamento antigo (marcar budget_exceeded e o renderer pular, mantendo
+    # o bloco atual no ar). -----------------------------------------------------
+    if budget_exceeded:
+        reprise = pick_reprise_item()
+        if reprise:
+            out = {
+                "id": safe(reprise.get("id")),
+                "title": safe(reprise.get("title")),
+                "title_original": safe(reprise.get("title_original")),
+                "category": safe(reprise.get("category")),
+                "commentary": safe(reprise.get("commentary")),
+                "source": safe(reprise.get("source")),
+                "audio_file": safe(reprise.get("audio_file")),
+                "budget_exceeded": "false",
+                "reprise": "true",
+                "timestamp": time.time(),
+            }
+            r.xadd(OUTPUT_STREAM, out)
+            r.xack(INPUT_STREAM, GROUP, event_id)
+            bump_metric("reprise")
+            print(
+                f"{TAG} → Orçamento esgotado, reprisando notícia já paga: "
+                f"{out['id']} ({out['title']})",
+                flush=True,
+            )
+            print(f"{TAG} → news.ready:", json.dumps(out, ensure_ascii=False))
+            return
+        print(
+            f"{TAG} → Orçamento esgotado e nenhuma notícia paga hoje ainda; "
+            f"pulando {news_id} e mantendo o bloco atual no ar.",
+            flush=True,
+        )
 
     out = {
         "id": news_id,
         "title": safe(data.get("title")),
         "title_original": safe(data.get("title_original")),
-        "category": safe(data.get("category")),
+        "category": category,
         "commentary": commentary,
+        "source": safe(data.get("source")),
         "audio_file": safe(audio_file),
+        "budget_exceeded": "true" if budget_exceeded else "false",
         "timestamp": time.time(),
     }
 
@@ -125,6 +359,12 @@ def handle_event(event_id, data):
     # Só confirma depois do áudio gravado em disco e do XADD de saída.
     r.xack(INPUT_STREAM, GROUP, event_id)
     print(f"{TAG} → news.ready:", json.dumps(out, ensure_ascii=False))
+
+    # Notícia real com áudio pago (gerado agora ou cache HIT): entra no índice
+    # de "completas de hoje" para poder ser reprisada de graça quando o
+    # orçamento esgotar. Promo e itens sem áudio real ficam de fora.
+    if not is_promo and not budget_exceeded and safe(audio_file):
+        record_completed_item(out)
 
 
 def reclaim_stuck():
