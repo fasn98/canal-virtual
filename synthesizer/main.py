@@ -1,5 +1,6 @@
 import time
 import os
+import re
 import datetime
 import redis
 import json
@@ -100,6 +101,31 @@ def safe(v):
     return str(v)
 
 
+# --- Detecção de itens de teste -------------------------------------------
+# Espelha renderer.is_test_item: id de produção = sha256(...)[:16] (16 chars
+# hex) ou "promo-...". Qualquer outro id (ou manchete "TESTE ...") é injeção
+# manual de teste — não deve entrar no índice de reprises nem ser reprisado,
+# senão um teste fica rodando em rotação quando o pipeline real está parado.
+_HEX16_RE = re.compile(r"^[0-9a-f]{16}$")
+_TEST_ID_PREFIXES = (
+    "test", "teste", "skiptest", "lipsynctest", "cache-test", "cachetest",
+    "cc-test", "cctest", "cg-test", "cgtest", "budgettest", "budget-test",
+    "reprisetest", "estudioteste", "dummy", "kill",
+)
+
+
+def is_test_id(news_id, title=""):
+    nid = (news_id or "").strip().lower()
+    if nid.startswith("promo-"):
+        return False
+    if not _HEX16_RE.match(nid) or nid.startswith(_TEST_ID_PREFIXES):
+        return True
+    t = " ".join((title or "").split()).lower()
+    return t == "teste" or t.startswith(
+        ("teste ", "teste:", "teste-", "test ", "test:", "test-")
+    )
+
+
 # --- Índice de notícias "completas" de hoje (para reprises sem custo) --------
 # Toda notícia que JÁ tem áudio real pago (gerado agora OU cache HIT) entra num
 # Hash Redis por data: field = id, value = JSON com o que o renderer precisa
@@ -125,6 +151,13 @@ def record_completed_item(item):
     Redis é só logada, nunca interrompe o fluxo."""
     news_id = safe(item.get("id"))
     if not news_id:
+        return
+    if is_test_id(news_id, safe(item.get("title"))):
+        print(
+            f"{TAG} → item de teste {news_id!r} NÃO entra no índice de reprises "
+            f"(não deve ir ao ar em rotação).",
+            flush=True,
+        )
         return
     try:
         payload = json.dumps(
@@ -154,7 +187,9 @@ def pick_reprise_item():
     mesmo item duas vezes seguidas."""
     try:
         key = _completed_key()
-        ids = sorted(r.hkeys(key))
+        # Filtra qualquer id de teste que tenha entrado no índice antes desta
+        # proteção existir — um teste nunca deve ser reprisado ao ar.
+        ids = sorted(k for k in r.hkeys(key) if not is_test_id(k))
     except Exception as e:
         print(f"{TAG} → AVISO: falha ao ler índice de notícias completas ({e}).", flush=True)
         return None

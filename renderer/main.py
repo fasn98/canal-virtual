@@ -1,5 +1,6 @@
 import time
 import datetime
+import re
 import redis
 import subprocess
 import os
@@ -105,8 +106,77 @@ TV_CURRENT_CATEGORY_KEY = "tv:current_category"
 # Destinos Finais
 final_file = f"{OUTPUT_DIR}/final.mp4"
 final_temp = f"{OUTPUT_DIR}/final_temp.mp4"
+# Itens de TESTE (ver is_test_item) renderizam AQUI em vez de sobrescrever o
+# final.mp4 que o streamer transmite ao vivo — a menos que ALLOW_TEST_ON_AIR
+# esteja explicitamente ligado. Assim um teste injetado à mão nunca fica
+# "preso" no ar quando o pipeline real não consegue produzir nada novo.
+final_test_file = f"{OUTPUT_DIR}/final_test.mp4"
+final_test_temp = f"{OUTPUT_DIR}/final_test_temp.mp4"
 title_txt_file = f"{OUTPUT_DIR}/title_temp.txt"
 ticker_txt_file = f"{OUTPUT_DIR}/ticker_temp.txt"
+
+# --- Proteção: itens de teste não vão ao ar por padrão ---------------------
+# ALLOW_TEST_ON_AIR=false (padrão) => item de teste renderiza em final_test.mp4
+# e NÃO toca no final.mp4 de produção. =true => Fabio liberou aquele teste a ir
+# ao ar mesmo assim (decisão caso a caso; o padrão é o seguro).
+ALLOW_TEST_ON_AIR = os.environ.get("ALLOW_TEST_ON_AIR", "false").strip().lower() in (
+    "1", "true", "yes", "on",
+)
+
+# id de produção: o collector gera sha256(...)[:16] (16 chars hex) e as
+# promoções usam o prefixo "promo-". Qualquer outro formato de id só aparece
+# quando alguém injeta uma mensagem à mão => tratamos como teste.
+_HEX16_RE = re.compile(r"^[0-9a-f]{16}$")
+# Rede de segurança extra: prefixos de id já usados em testes manuais deste
+# pipeline (todos minúsculos). É redundante com a checagem de formato acima,
+# mas deixa explícito o que já foi usado e continua pegando o caso se a regra
+# de formato for afrouxada no futuro.
+TEST_ID_PREFIXES = (
+    "test", "teste", "skiptest", "lipsynctest", "cache-test", "cachetest",
+    "cc-test", "cctest", "cg-test", "cgtest", "budgettest", "budget-test",
+    "reprisetest", "estudioteste", "dummy", "kill",
+)
+
+
+def is_test_item(news_id, title):
+    """True se este item parece uma injeção manual de teste — nesse caso ele
+    NÃO deve sobrescrever o final.mp4 de produção sem ALLOW_TEST_ON_AIR.
+
+    Sinais, em ordem:
+      1. id fora do formato de produção (não é hex de 16 chars nem "promo-...");
+      2. id começa com um prefixo de teste conhecido (TEST_ID_PREFIXES);
+      3. a manchete começa com "TESTE"/"TEST " — cobre o caso do item que
+         travou a produção em 29/08, cujo id ERA um hash hex válido e só a
+         manchete denunciava que era teste.
+    """
+    nid = (news_id or "").strip().lower()
+    if nid.startswith("promo-"):
+        return False
+    if not _HEX16_RE.match(nid):
+        return True
+    if nid.startswith(TEST_ID_PREFIXES):
+        return True
+    t = " ".join((title or "").split()).lower()
+    if t == "teste" or t.startswith(
+        ("teste ", "teste:", "teste-", "test ", "test:", "test-")
+    ):
+        return True
+    return False
+
+
+# --- Alerta de conteúdo parado (staleness) -------------------------------
+# Se o final.mp4 de produção passar deste tempo sem ser atualizado por um item
+# REAL (não teste) bem-sucedido, o loop principal loga um aviso. Não para nada:
+# é só visibilidade rápida em log para não descobrir horas depois.
+STALENESS_ALERT_AFTER_SEC = int(
+    os.environ.get("STALENESS_ALERT_AFTER_SEC", str(20 * 60))
+)
+# Não repetir o alerta a cada volta do loop (5s); 1x a cada 5 min basta.
+STALENESS_LOG_INTERVAL_SEC = int(os.environ.get("STALENESS_LOG_INTERVAL_SEC", "300"))
+# Marca (ISO, UTC) da última emissão REAL ao vivo. Vive no Redis para
+# sobreviver a restart do renderer.
+REAL_EMISSION_KEY = "renderer:last_real_emission"
+_last_staleness_log = 0.0
 
 
 def ensure_group():
@@ -329,6 +399,26 @@ def handle_event(event_id, data):
     text = data.get("commentary", "")
     news_id = data.get("id", "0")
 
+    # Item de teste? (id fora do formato de produção, prefixo de teste, ou
+    # manchete "TESTE ..."). Por padrão um teste NÃO sobrescreve o final.mp4 de
+    # produção: ele renderiza em final_test.mp4 para inspeção manual. Com
+    # ALLOW_TEST_ON_AIR=true, Fabio liberou aquele teste a ir ao ar.
+    test_item = is_test_item(news_id, title)
+    on_air = (not test_item) or ALLOW_TEST_ON_AIR
+    target_final = final_file if on_air else final_test_file
+    target_temp = final_temp if on_air else final_test_temp
+    if test_item:
+        destino = (
+            "AO VIVO (ALLOW_TEST_ON_AIR=true)"
+            if ALLOW_TEST_ON_AIR
+            else f"{final_test_file} (FORA do ar; final.mp4 de produção intacto)"
+        )
+        print(
+            f"{TAG} → 🧪 Item de TESTE detectado (id={news_id!r}, title={title!r}) "
+            f"→ {destino}",
+            flush=True,
+        )
+
     # Freio de gasto diário da ElevenLabs (marcado pelo synthesizer). Quando o
     # orçamento do dia esgotou, NÃO renderizamos bloco novo para este item e
     # NÃO usamos o áudio dummy: apenas confirmamos a mensagem e seguimos, sem
@@ -370,7 +460,7 @@ def handle_event(event_id, data):
     # synthesizer — nunca para o áudio de fallback. Em falha, `lipsync_video`
     # fica None e a composição usa a imagem estática, exatamente como antes.
     lipsync_video = None
-    if ENABLE_LIPSYNC and AUDIO_FILE != DUMMY_AUDIO:
+    if ENABLE_LIPSYNC and AUDIO_FILE != DUMMY_AUDIO and on_air:
         try:
             from lipsync import get_lipsync_video
             lipsync_video = get_lipsync_video(news_id, AUDIO_FILE)
@@ -386,12 +476,17 @@ def handle_event(event_id, data):
     # TV virtual: 1 vídeo de b-roll por bloco (ver get_block_tv_video). Em
     # qualquer falha tv_video fica None e a composição roda sem a TV, igual a hoje.
     tv_video = None
-    try:
-        tv_video = get_block_tv_video(is_promo, category, news_id, title)
-    except Exception as e:
-        print(f"{TAG} → AVISO: TV virtual indisponível ({e}); bloco sem TV.", flush=True)
-    if tv_video:
-        print(f"{TAG} → TV virtual: {tv_video}", flush=True)
+    if on_air:
+        try:
+            tv_video = get_block_tv_video(is_promo, category, news_id, title)
+        except Exception as e:
+            print(f"{TAG} → AVISO: TV virtual indisponível ({e}); bloco sem TV.", flush=True)
+        if tv_video:
+            print(f"{TAG} → TV virtual: {tv_video}", flush=True)
+    else:
+        # Teste fora do ar: não mexe no contador de bloco da TV nem chama
+        # Pexels/YouTube — só remonta o vídeo para inspeção.
+        print(f"{TAG} → teste fora do ar: pulando TV virtual (rotação intacta).", flush=True)
 
     PROMO_LOWERTHIRD = "youtube.com/@FutureVerse-Beyond"
     PROMO_TICKER = (
@@ -541,7 +636,7 @@ def handle_event(event_id, data):
         "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
         "-c:a", "aac",
         "-shortest",
-        final_temp
+        target_temp
     ]
 
     print(f"{TAG} → Renderizando Bloco Gráfico Unificado...")
@@ -557,13 +652,26 @@ def handle_event(event_id, data):
         # Levanta exceção: sem XACK, a mensagem segue pendente para reprocessamento.
         raise RuntimeError(f"ffmpeg falhou (rc={result.returncode}) para notícia {news_id}")
 
-    # Entrega Atômica e Definitiva para o Streamer
-    if not os.path.exists(final_temp):
-        raise RuntimeError(f"final_temp.mp4 não foi gerado para notícia {news_id}")
+    # Entrega Atômica e Definitiva
+    if not os.path.exists(target_temp):
+        raise RuntimeError(f"{os.path.basename(target_temp)} não foi gerado para notícia {news_id}")
 
-    os.replace(final_temp, final_file)
-    os.chmod(final_file, 0o777)
-    print(f"{TAG} → SUCESSO EMISSÃO: {final_file} gerado com sucesso!")
+    os.replace(target_temp, target_final)
+    os.chmod(target_final, 0o777)
+
+    if not on_air:
+        # Teste fora do ar: arquivo separado gerado, final.mp4 de produção
+        # intacto, nada publicado em news.block. Só confirma a mensagem.
+        print(
+            f"{TAG} → 🧪 TESTE renderizado em {target_final} (NÃO foi ao ar). "
+            f"Inspecione e, se quiser mandar pro ar, injete com "
+            f"ALLOW_TEST_ON_AIR=true.",
+            flush=True,
+        )
+        r.xack(INPUT_STREAM, GROUP, event_id)
+        return
+
+    print(f"{TAG} → SUCESSO EMISSÃO: {target_final} gerado com sucesso!")
 
     # Marca da última emissão bem-sucedida, lida pela metrics-api
     # (GET /status/pipeline). Best-effort: nunca quebra a entrega do bloco.
@@ -576,13 +684,18 @@ def handle_event(event_id, data):
     except Exception:
         pass
 
+    # Marca da última emissão REAL (não teste) ao vivo — base do alerta de
+    # staleness (check_staleness). Best-effort.
+    if not test_item:
+        mark_real_emission()
+
     block = {
         "id": news_id,
         "title": title,
         "title_original": title_original,
         "category": category,
         "text": text,
-        "video_file": final_file
+        "video_file": target_final
     }
     r.xadd(OUTPUT_STREAM, block)
 
@@ -651,6 +764,49 @@ def maybe_reclaim_stuck():
         print(f"{TAG} → ERRO no scan de mensagens travadas:", e, flush=True)
 
 
+def mark_real_emission():
+    """Marca 'agora' como a última emissão REAL (não teste) que foi ao ar —
+    base do alerta de staleness. Best-effort: qualquer falha de Redis é
+    engolida."""
+    try:
+        r.set(
+            REAL_EMISSION_KEY,
+            datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+            ex=30 * 24 * 3600,
+        )
+    except Exception:
+        pass
+
+
+def check_staleness():
+    """Loga um aviso (no máx. 1x a cada STALENESS_LOG_INTERVAL_SEC) se o
+    final.mp4 de produção passou de STALENESS_ALERT_AFTER_SEC sem ser
+    atualizado por um item REAL bem-sucedido. Não interrompe nada."""
+    global _last_staleness_log
+    now = time.monotonic()
+    if now - _last_staleness_log < STALENESS_LOG_INTERVAL_SEC:
+        return
+    try:
+        raw = r.get(REAL_EMISSION_KEY)
+    except Exception:
+        return
+    if not raw:
+        return
+    try:
+        last = datetime.datetime.fromisoformat(raw)
+    except (ValueError, TypeError):
+        return
+    age = (datetime.datetime.now(datetime.timezone.utc) - last).total_seconds()
+    if age <= STALENESS_ALERT_AFTER_SEC:
+        return
+    _last_staleness_log = now
+    print(
+        f"{TAG} → ⚠️ ALERTA: final.mp4 sem atualização real há {int(age // 60)} min "
+        f"— possível problema de API/crédito (ElevenLabs/D-ID) ou pipeline parado.",
+        flush=True,
+    )
+
+
 def main():
     while True:
         try:
@@ -687,10 +843,27 @@ def main():
         f"scan={STUCK_SCAN_INTERVAL_SEC}s).",
         flush=True,
     )
+    print(
+        f"{TAG} → proteção de teste: itens de teste vão para {final_test_file} "
+        f"(ALLOW_TEST_ON_AIR={os.environ.get('ALLOW_TEST_ON_AIR', 'false')}); "
+        f"alerta de staleness após {STALENESS_ALERT_AFTER_SEC // 60} min sem "
+        f"emissão real.",
+        flush=True,
+    )
+    # Baseline do alerta de staleness: se ainda não há marca (Redis novo, ou
+    # primeira vez com este código), começa a contar a partir de agora para
+    # não disparar um "há N min" gigante logo no boot.
+    try:
+        if not r.get(REAL_EMISSION_KEY):
+            mark_real_emission()
+            print(f"{TAG} → baseline de staleness inicializado (sem marca anterior).", flush=True)
+    except Exception:
+        pass
 
     while True:
         try:
             maybe_reclaim_stuck()
+            check_staleness()
 
             msgs = r.xreadgroup(GROUP, CONSUMER, {INPUT_STREAM: ">"}, count=1, block=5000)
             if not msgs:

@@ -151,6 +151,14 @@ services:
       - STUCK_MESSAGE_TIMEOUT_MS=${STUCK_MESSAGE_TIMEOUT_MS:-60000}
       - MAX_DELIVERY_ATTEMPTS=${MAX_DELIVERY_ATTEMPTS:-3}
       - STUCK_SCAN_INTERVAL_SEC=${STUCK_SCAN_INTERVAL_SEC:-30}
+      # Proteção: itens de TESTE (id fora do formato de produção, prefixo de
+      # teste conhecido, ou manchete "TESTE ...") NÃO sobrescrevem o final.mp4
+      # de produção — renderizam em /app/output/final_test.mp4 para inspeção.
+      # ALLOW_TEST_ON_AIR=true libera um teste a ir ao ar mesmo assim.
+      - ALLOW_TEST_ON_AIR=${ALLOW_TEST_ON_AIR:-false}
+      # Alerta em log se o final.mp4 de produção ficar este tempo (segundos)
+      # sem ser atualizado por um item real bem-sucedido. Só loga, não para nada.
+      - STALENESS_ALERT_AFTER_SEC=${STALENESS_ALERT_AFTER_SEC:-1200}
       # Lip-sync real do avatar via D-ID (POC, plano Pro). false = pipeline
       # atual (avatar estático); true = tenta D-ID e cai no estático se falhar.
       - ENABLE_LIPSYNC=${ENABLE_LIPSYNC:-false}
