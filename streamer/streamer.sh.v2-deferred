@@ -1,0 +1,140 @@
+#!/bin/bash
+#
+# Motor de transmissão contínua (v2 — conexão RTMP persistente).
+# ============================================================================
+# HISTÓRICO / POR QUÊ
+# ------------------------------------------------------------------------------
+# A v1 relançava o ffmpeg a CADA bloco de vídeo (loop `while true; ffmpeg ...`).
+# O diagnóstico de 2026-08-30 (coleta de 45 min do eth0 + mtr 200 ciclos)
+# provou que os "engasgos residuais" NÃO eram jitter de rede (mtr: 0% de perda
+# real até o YouTube; NIC sem erro), e sim dois eventos periódicos travados no
+# ciclo de ~173s do próprio streamer:
+#   A) a emenda de reinício do ffmpeg entre blocos -> reconexão RTMP + TCP
+#      slow-start a cada 173s (blip de ~2-4s);
+#   B) a trilha (34,7s) acabando no meio do bloco com amix duration=shortest
+#      -> mux travado, TX zerada por 6-8s.
+#
+# ARQUITETURA (Correção 2 — mata o evento A)
+# ------------------------------------------------------------------------------
+# UM único ffmpeg persistente publica no RTMP e NUNCA é reiniciado por troca de
+# bloco. A entrada é o demuxer `concat` lendo uma PLAYLIST ESTÁTICA GRANDE:
+# milhares de linhas iguais
+#     file '/app/output/final.mp4'
+# O renderer sempre grava nesse caminho fixo, de forma ATÔMICA
+# (os.replace em renderer/main.py, linha ~659). O demuxer concat REABRE o
+# caminho a cada entrada da playlist (verificado em teste: troca de conteúdo
+# via mv atômico é captada na entrada seguinte) e emenda os timestamps entre
+# entradas (splice monotônico) — então o libx264/mux/RTMP recebem um fluxo
+# contínuo, sem reconexão e sem "Non-monotonous DTS".
+#
+# Por que playlist estática grande e não um FIFO "ao vivo": o demuxer concat lê
+# a lista INTEIRA até EOF no read_header antes de começar a tocar. Uma playlist
+# via FIFO que nunca fecha faz o ffmpeg travar lendo a lista para sempre (testado
+# — trava em pipe_read, 0 bytes de saída). Com PLAYLIST_ENTRIES entradas a
+# ~170s cada, a lista só se esgota depois de ~PLAYLIST_ENTRIES*170/86400 dias
+# (padrão 50000 => ~98 dias); quando esgota, o ffmpeg sai limpo e o watchdog
+# relança (aí sim uma reconexão, uma vez a cada ~3 meses — ou a cada deploy,
+# o que vier antes).
+#
+# GARANTIAS
+#   - Troca de bloco (novo final.mp4): captada na próxima entrada da playlist,
+#     SEM reiniciar a conexão RTMP. Latência de troca <= 1 bloco.
+#   - Renderer sem gerar nada novo (ex.: cota de API zerada): o concat segue
+#     reabrindo o MESMO final.mp4 => o último bloco válido repete pra sempre.
+#     O publisher não trava nem cai.
+#   - Watchdog: só relança o ffmpeg se o PROCESSO morrer (falha real de
+#     rede/RTMP, ou playlist esgotada). Só isso reconecta.
+#
+# Áudio: -stream_loop -1 na música (tem ~34,7s, o bloco tem ~170s) + amix
+# duration=first (segue o vídeo/voz). Sem isso a mixagem terminava aos ~35s
+# e travava o mux (evento B).
+# ============================================================================
+
+set -u
+
+if [ -z "${RTMP_URL:-}" ]; then
+  echo "[Streamer] ERRO: variável de ambiente RTMP_URL não definida. Abortando."
+  exit 1
+fi
+
+# Controle de volume explícito do mix de áudio.
+# MUSIC_VOLUME: ganho aplicado à música de fundo ANTES da mixagem (0.15 = 15% do volume original).
+# VOICE_VOLUME: leve boost na voz da narradora (TTS), que sai bem abaixo do nível confortável de fala.
+MUSIC_VOLUME="${MUSIC_VOLUME:-0.15}"
+VOICE_VOLUME="${VOICE_VOLUME:-5.0}"
+
+INPUT="/app/output/final.mp4"
+BACKGROUND_MUSIC="/app/assets/musica_classica.mp3"
+PLAYLIST="/app/output/streamer_playlist.txt"
+
+# Nº de entradas na playlist. Cada entrada = 1 reprodução do final.mp4 corrente
+# (~170s). 50000 * 170s ≈ 98 dias até a lista esgotar e o watchdog relançar.
+PLAYLIST_ENTRIES="${PLAYLIST_ENTRIES:-50000}"
+# Segundos de espera antes de relançar o publisher se ele cair de verdade.
+PUBLISHER_RESTART_BACKOFF="${PUBLISHER_RESTART_BACKOFF:-3}"
+
+echo "[Streamer] Iniciando o motor de transmissão contínua (v2, conexão RTMP persistente)..."
+echo "[Streamer] MUSIC_VOLUME=${MUSIC_VOLUME} | VOICE_VOLUME=${VOICE_VOLUME} | PLAYLIST_ENTRIES=${PLAYLIST_ENTRIES}"
+
+PUB_PID=""
+
+cleanup() {
+  trap - EXIT INT TERM
+  echo "[Streamer] Encerrando: parando publisher ffmpeg..."
+  [ -n "$PUB_PID" ] && kill -TERM "$PUB_PID" 2>/dev/null
+  wait 2>/dev/null
+  exit 0
+}
+trap cleanup EXIT INT TERM
+
+# --- Espera o primeiro bloco válido antes de abrir a conexão --------------
+while [ ! -s "$INPUT" ]; do
+  echo "[Streamer] Aguardando o primeiro final.mp4 valido e completo..."
+  sleep 2
+done
+
+write_playlist() {
+  # Regenerada a cada (re)lançamento, então um relançamento sempre parte de uma
+  # lista cheia. Linhas idênticas: o concat reabre o caminho a cada entrada.
+  {
+    echo "# playlist do streamer — ${PLAYLIST_ENTRIES}x o final.mp4 corrente. Gerada $(date '+%F %T')."
+    yes "file '${INPUT}'" | head -n "$PLAYLIST_ENTRIES"
+  } > "$PLAYLIST"
+}
+
+start_publisher() {
+  write_playlist
+  # -nostdin: sem isso, stdin fechado/EOF (container sem TTY) faz o ffmpeg 7.x
+  # pedir "immediate exit" e morrer no boot.
+  ffmpeg -nostdin -hide_banner -loglevel warning \
+    -re -fflags +genpts -f concat -safe 0 -i "$PLAYLIST" \
+    -stream_loop -1 -re -i "$BACKGROUND_MUSIC" \
+    -filter_complex "[1:a]volume=${MUSIC_VOLUME}[music_low];[0:a]volume=${VOICE_VOLUME}[voice_boosted];[voice_boosted][music_low]amix=inputs=2:duration=first:dropout_transition=3:normalize=0[aout]" \
+    -map 0:v -map "[aout]" \
+    -c:v libx264 -preset ultrafast -tune zerolatency -pix_fmt yuv420p \
+    -b:v 4500k -maxrate 4700k -bufsize 18000k \
+    -g 60 -keyint_min 30 \
+    -c:a aac -b:a 128k -ar 48000 -ac 2 \
+    -f flv "$RTMP_URL" </dev/null &
+  PUB_PID=$!
+  echo "[Streamer] publisher ffmpeg iniciado (pid $PUB_PID) -> conexão RTMP única."
+}
+
+start_publisher
+
+# --- Watchdog: só age se o publisher MORRER ------------------------------
+while true; do
+  if ! kill -0 "$PUB_PID" 2>/dev/null; then
+    wait "$PUB_PID" 2>/dev/null
+    rc=$?
+    echo "[Streamer] AVISO: publisher ffmpeg caiu (rc=$rc). Relançando em ${PUBLISHER_RESTART_BACKOFF}s (isto reconecta o RTMP)..."
+    sleep "$PUBLISHER_RESTART_BACKOFF"
+    # Garante que ainda há um final.mp4 válido antes de reabrir.
+    while [ ! -s "$INPUT" ]; do
+      echo "[Streamer] Aguardando final.mp4 valido para religar..."
+      sleep 2
+    done
+    start_publisher
+  fi
+  sleep 5
+done
