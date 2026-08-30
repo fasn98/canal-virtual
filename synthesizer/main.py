@@ -179,11 +179,15 @@ def synthesize_audio(text, news_id, is_promo=False):
     """
     Gera o áudio real da notícia via ElevenLabs TTS.
     Retorna uma tupla (audio_path, budget_exceeded):
-      - audio_path  = caminho do mp3 gerado, ou "" quando não há áudio real
-        (o renderer usa um áudio padrão como fallback quando recebe "");
+      - audio_path  = caminho do mp3 gerado (síntese nova OU cache HIT), ou ""
+        quando NÃO há áudio real: TTS falhou (sem crédito/quota_exceeded, chave
+        inválida, HTTP != 200, erro de rede, arquivo vazio) ou o texto veio
+        vazio. Nesse caso handle_event NÃO publica a notícia em news.ready — sem
+        áudio real não vai ao ar bloco novo, e o streamer segue transmitindo o
+        último final.mp4 completo (ver handle_event).
       - budget_exceeded = True quando NÃO chamamos a ElevenLabs porque o
-        orçamento diário de créditos acabaria — nesse caso o renderer PULA o
-        item em vez de usar o fallback (ver renderer/main.py).
+        orçamento diário de créditos acabaria — caso à parte, tratado com
+        reprise/skip em handle_event (não confundir com falha de síntese).
     """
     if not text.strip():
         print(f"{TAG} → Texto vazio para {news_id}, pulando TTS.")
@@ -305,6 +309,28 @@ def handle_event(event_id, data):
     # = True quando o freio de gasto diário barrou a chamada; nesse caso o
     # renderer pula o item e mantém o último bloco bom no ar.
     audio_file, budget_exceeded = synthesize_audio(commentary, news_id, is_promo=is_promo)
+
+    # --- Falha de síntese (ElevenLabs indisponível / sem crédito / quota_exceeded
+    # / chave inválida / erro de rede / texto vazio): NÃO publica a notícia em
+    # news.ready. Publicar com audio_file="" faria o renderer gerar um final.mp4
+    # NOVO com a MANCHETE NOVA e o áudio dummy antigo ("nenhuma notícia
+    # disponível") — combinação incoerente que já foi ao ar. Em vez disso:
+    # loga o skip, dá XACK (a mensagem NÃO volta pra fila — enquanto a cota
+    # estiver zerada ela falharia de novo) e segue. Como nada chega em
+    # news.ready, o renderer não gera bloco novo e o streamer continua no
+    # ÚLTIMO final.mp4 completo. Quando a síntese voltar a funcionar (ou cair no
+    # cache), o ciclo normaliza sozinho. É mutuamente exclusivo com
+    # budget_exceeded, tratado logo abaixo; o fallback do D-ID no renderer (áudio
+    # real sem animação labial) NÃO é afetado.
+    if not budget_exceeded and not audio_file:
+        print(
+            f"{TAG} → PULADO {news_id}: falha na síntese de áudio, sem crédito/erro. "
+            f"Notícia não publicada.",
+            flush=True,
+        )
+        bump_metric("synth:skipped")
+        r.xack(INPUT_STREAM, GROUP, event_id)
+        return
 
     # --- Orçamento esgotado: em vez de só pular, reprisa em rotação uma notícia
     # de hoje que JÁ tem áudio real pago (republica em news.ready sem novo gasto
