@@ -59,9 +59,28 @@ MAX_CORRECTION_ATTEMPTS = int(os.environ.get("MAX_CORRECTION_ATTEMPTS", "2"))
 REVIEW_MODEL = (
     os.environ.get("REVIEW_MODEL", "").strip()
     or os.environ.get("ANTHROPIC_MODEL", "").strip()
-    or "claude-sonnet-4-5"
+    or "claude-sonnet-5"
 )
 REVIEW_MAX_TOKENS = int(os.environ.get("REVIEW_MAX_TOKENS", "400"))
+
+
+def log_usage(tag, kind, usage):
+    """Loga os tokens de cada categoria que a API devolve, para acompanhar a
+    taxa de acerto do cache de prompt ao longo do tempo. `cache_read` alto a
+    partir da 2ª chamada do mesmo tipo = cache funcionando; só `cache_write` em
+    toda chamada = cache não está sendo reaproveitado. Best-effort: nunca
+    interrompe o pipeline."""
+    try:
+        print(
+            f"{tag} → tokens[{kind}] "
+            f"input={getattr(usage, 'input_tokens', 0)} "
+            f"cache_write={getattr(usage, 'cache_creation_input_tokens', 0)} "
+            f"cache_read={getattr(usage, 'cache_read_input_tokens', 0)} "
+            f"output={getattr(usage, 'output_tokens', 0)}",
+            flush=True,
+        )
+    except Exception:
+        pass
 
 
 class ReviewUnavailable(Exception):
@@ -77,7 +96,35 @@ def _extract_text(resp):
     ).strip()
 
 
-def _ask_verdict(client, system, user, kind):
+def _build_review_system(role_block):
+    """Monta o `system` das chamadas de revisão como DOIS blocos estáticos, cada
+    um com um breakpoint de cache:
+
+      1. _REVIEW_PREAMBLE — idêntico byte a byte nas TRÊS chamadas de revisão e
+         em todas as notícias. Dentro de uma mesma notícia, a 1ª revisão grava
+         este bloco no cache e as outras duas o leem a ~10% do custo.
+      2. role_block — as instruções do papel (verificador / editorial /
+         aprovador). Como o prefixo acumulado (preâmbulo + papel) já passa do
+         mínimo cacheável, este 2º breakpoint faz o system inteiro daquele papel
+         ser lido do cache nas notícias seguintes (janela de 5 min).
+
+    Estático primeiro, dinâmico (a notícia) depois, sempre — o conteúdo da
+    notícia vai só na mensagem 'user', nunca aqui."""
+    return [
+        {
+            "type": "text",
+            "text": _REVIEW_PREAMBLE,
+            "cache_control": {"type": "ephemeral"},
+        },
+        {
+            "type": "text",
+            "text": role_block,
+            "cache_control": {"type": "ephemeral"},
+        },
+    ]
+
+
+def _ask_verdict(client, role_block, user, kind):
     """Faz uma chamada de revisão e devolve (aprovado: bool, motivo: str).
     Espera um JSON {"veredito": "APROVADO"|"REPROVADO", "motivo": "..."}.
     Levanta ReviewUnavailable se a chamada falhar ou a resposta não for
@@ -86,9 +133,10 @@ def _ask_verdict(client, system, user, kind):
         resp = client.messages.create(
             model=REVIEW_MODEL,
             max_tokens=REVIEW_MAX_TOKENS,
-            system=system,
+            system=_build_review_system(role_block),
             messages=[{"role": "user", "content": user}],
         )
+        log_usage(TAG, kind, resp.usage)
         raw = _extract_text(resp)
     except Exception as e:
         raise ReviewUnavailable(f"{type(e).__name__}: {e}")
@@ -125,22 +173,108 @@ def _parse_json_obj(raw):
         return None
 
 
+# --- Preâmbulo compartilhado das 3 revisões (bloco estático cacheável) ------
+# Idêntico byte a byte nas três chamadas (verificador, editorial, aprovador) e
+# em todas as notícias. É o 1º breakpoint de cache do `system` — ver
+# _build_review_system(). Precisa passar do mínimo cacheável do modelo (1024
+# tokens no Sonnet); qualquer edição aqui invalida o cache das três revisões.
+_REVIEW_PREAMBLE = (
+    "CONTEXTO DA OPERAÇÃO\n"
+    "\n"
+    "Você faz parte da revisão editorial de um telejornal automatizado. O fluxo "
+    "é o seguinte: um coletor capta notícias de agências internacionais (BBC, "
+    "Guardian) em inglês; um classificador traduz o título para o português e "
+    "atribui uma categoria; um comentarista escreve um comentário analítico em "
+    "português do Brasil sobre a notícia; e então três revisores independentes — "
+    "um verificador de fatos, um revisor editorial e um aprovador final — "
+    "decidem se o comentário pode virar áudio e ir ao ar. Você é um desses três "
+    "revisores. O seu papel específico está descrito logo depois deste contexto "
+    "comum; leia-o com atenção, porque ele restringe aquilo que você deve "
+    "avaliar. Não opine sobre aspectos que pertencem a outro revisor.\n"
+    "\n"
+    "O MATERIAL QUE VOCÊ RECEBE\n"
+    "\n"
+    "- FONTE: a agência de origem, quando informada.\n"
+    "- TÍTULO ORIGINAL: o título em inglês, como veio da agência.\n"
+    "- TÍTULO (pt): a tradução para o português usada no ar.\n"
+    "- RESUMO ORIGINAL: o resumo em inglês da agência. Esta é a ÚNICA base "
+    "factual autorizada para o comentário.\n"
+    "- CATEGORIA: rótulo temático (Política, Economia, Segurança, Clima, Saúde, "
+    "Entretenimento, Esportes, Mundo e afins).\n"
+    "- COMENTÁRIO: o texto do comentarista, em português, que está sendo "
+    "avaliado.\n"
+    "\n"
+    "O comentário é uma ANÁLISE sobre a notícia, não a leitura da notícia. "
+    "Espera-se que ele contextualize o tema, aponte causas prováveis, "
+    "implicações e cenários possíveis. Isso é a função dele, não um defeito a "
+    "corrigir.\n"
+    "\n"
+    'O QUE É "FATO ESPECÍFICO", E POR QUE IMPORTA\n'
+    "\n"
+    "Fato específico é qualquer afirmação concreta e verificável atribuída à "
+    "realidade: um número, uma estatística, uma porcentagem, uma data, um valor "
+    "monetário, um placar, um resultado de votação, um nome próprio, um cargo, "
+    "um local determinado ou uma citação textual entre aspas. Um fato "
+    "específico só pode aparecer no comentário se estiver no título original, no "
+    "resumo original, ou for dedução direta e inequívoca deles.\n"
+    "\n"
+    "NÃO são fatos específicos, e portanto são PERMITIDOS mesmo sem constar da "
+    "fonte: contextualização histórica ampla; conhecimento geral consolidado "
+    '("bancos centrais costumam reagir à inflação elevando os juros"); análise '
+    "de tendências; cenários hipotéticos claramente marcados como possibilidade "
+    '("caso o quadro se mantenha, é provável que..."); e juízos de '
+    "probabilidade explicitados como interpretação do comentarista. O idioma da "
+    "fonte (inglês) e o do comentário (português) são diferentes por construção "
+    "— divergência de idioma nunca é um problema a apontar.\n"
+    "\n"
+    "CALIBRAGEM DE SEVERIDADE\n"
+    "\n"
+    "Seja exigente, mas não pedante. Só reprove problemas que um espectador "
+    "atento perceberia como erro factual, parcialidade ou falta de "
+    "profissionalismo. Não reprove por preferência de estilo, por o comentário "
+    "ser mais raso ou mais profundo do que você faria, nem por ele deixar de "
+    "mencionar algo que a própria fonte também não mencionava. Na dúvida entre "
+    "um problema real e uma implicância, aprove.\n"
+    "\n"
+    "FORMATO DA RESPOSTA — OBRIGATÓRIO\n"
+    "\n"
+    "Responda com UM único objeto JSON e NADA MAIS: sem texto antes, sem texto "
+    "depois, sem markdown, sem cercas de código. O objeto tem exatamente duas "
+    "chaves:\n"
+    "\n"
+    '  {"veredito": "<um dos rótulos definidos no seu papel>", "motivo": "<string>"}\n'
+    "\n"
+    'Regras do campo "motivo": string vazia ("") quando você aprova ou libera; '
+    "quando reprova ou bloqueia, uma frase objetiva citando o trecho ou o dado "
+    "problemático e o que precisa mudar. Esse motivo é entregue de volta ao "
+    "comentarista para a reescrita, então precisa ser acionável. Nunca mais de "
+    "duas frases.\n"
+    "\n"
+    "EXEMPLOS DO FORMATO (ilustrativos, não são o caso em avaliação)\n"
+    "\n"
+    "Aprovação:\n"
+    '  {"veredito": "APROVADO", "motivo": ""}\n'
+    "\n"
+    "Reprovação por dado inventado:\n"
+    '  {"veredito": "REPROVADO", "motivo": "O comentário afirma que a medida foi '
+    "'aprovada por 7 votos a 2', placar de votação que não aparece no resumo da "
+    'fonte."}\n'
+)
+
 # --- 1) Verificador de fatos -------------------------------------------------
 
-_FACT_SYSTEM = (
-    "Você é um verificador de fatos rigoroso de uma redação de telejornal. "
-    "Recebe o MATERIAL ORIGINAL de uma notícia (título e resumo de uma agência) "
-    "e um COMENTÁRIO analítico que um comentarista escreveu sobre ela. "
-    "Sua única tarefa: verificar se o comentário introduz algum FATO ESPECÍFICO "
-    "— número, estatística, porcentagem, data, valor, nome próprio, cargo, local "
-    "ou citação textual — que NÃO está presente no material original nem é "
-    "dedutível dele. Contextualização, análise, interpretação, cenários "
-    "hipotéticos claramente marcados como tais e conhecimento geral amplo são "
-    "PERMITIDOS. Invenção de dados concretos apresentados como se fossem da "
-    "notícia é REPROVAÇÃO. O material original está em inglês; o comentário, em "
-    "português — divergência de idioma não é problema. "
-    'Responda SOMENTE um objeto JSON: {"veredito": "APROVADO" ou "REPROVADO", '
-    '"motivo": "vazio se aprovado; se reprovado, cite o trecho/dado inventado"}.'
+_FACT_ROLE = (
+    "SEU PAPEL: VERIFICADOR DE FATOS\n"
+    "\n"
+    "Sua única tarefa é checar se o COMENTÁRIO introduz algum FATO ESPECÍFICO "
+    "(conforme a definição do preâmbulo) que NÃO está no material original nem "
+    "é dedutível dele. Tom, viés e estilo NÃO são seu departamento — ignore-os "
+    "aqui. Contextualização, análise, interpretação, cenários hipotéticos "
+    "marcados como tais e conhecimento geral amplo são PERMITIDOS. Inventar "
+    "dado concreto e apresentá-lo como se fosse da notícia é REPROVAÇÃO.\n"
+    "\n"
+    'Rótulos do "veredito" no seu papel: "APROVADO" ou "REPROVADO". Se '
+    "REPROVADO, o motivo deve citar o trecho ou o dado inventado."
 )
 
 
@@ -151,25 +285,27 @@ def fact_check(client, commentary, title_original, summary, source):
         f"RESUMO ORIGINAL: {summary or '(sem resumo)'}\n\n"
         f"COMENTÁRIO A VERIFICAR:\n{commentary}"
     )
-    return _ask_verdict(client, _FACT_SYSTEM, user, "fact_check")
+    return _ask_verdict(client, _FACT_ROLE, user, "fact_check")
 
 
 # --- 2) Revisor editorial --------------------------------------------------
 
-_EDITORIAL_SYSTEM = (
-    "Você é o editor-chefe de um telejornal, responsável pela linha editorial. "
-    "Recebe um COMENTÁRIO analítico sobre uma notícia e avalia SOMENTE: "
-    "(a) tom — adequado a um telejornal sério, sem sensacionalismo, alarmismo "
-    "ou apelo emocional excessivo; (b) viés não-intencional — o texto pende para "
-    "um lado sem necessidade, adjetiva atores de forma desigual, ou trata uma "
-    "das partes com mais benevolência; (c) opinião disfarçada de fato — juízos "
-    "de valor apresentados como se fossem constatação objetiva. "
-    "Análise e apontamento de cenários são esperados e OK, desde que "
-    "atribuídos como interpretação. Seja exigente mas não pedante: só reprove "
-    "problemas que um espectador perceberia como parcialidade ou falta de "
-    "profissionalismo. "
-    'Responda SOMENTE um objeto JSON: {"veredito": "APROVADO" ou "REPROVADO", '
-    '"motivo": "vazio se aprovado; se reprovado, aponte o trecho e o problema"}.'
+_EDITORIAL_ROLE = (
+    "SEU PAPEL: REVISOR EDITORIAL (EDITOR-CHEFE)\n"
+    "\n"
+    "Você é responsável pela linha editorial. Avalie SOMENTE: (a) tom — "
+    "adequado a um telejornal sério, sem sensacionalismo, alarmismo ou apelo "
+    "emocional excessivo; (b) viés não-intencional — o texto pende para um lado "
+    "sem necessidade, adjetiva atores de forma desigual, ou trata uma das "
+    "partes com mais benevolência que a outra; (c) opinião disfarçada de fato — "
+    "juízo de valor apresentado como se fosse constatação objetiva. Análise e "
+    "apontamento de cenários são esperados e estão OK, desde que atribuídos "
+    "como interpretação do comentarista. Checagem factual NÃO é seu "
+    "departamento — outro revisor cuida disso.\n"
+    "\n"
+    'Rótulos do "veredito" no seu papel: "APROVADO" ou "REPROVADO". Se '
+    "REPROVADO, o motivo deve apontar o trecho e qual dos três problemas ele "
+    "configura."
 )
 
 
@@ -179,20 +315,25 @@ def editorial_review(client, commentary, title, category):
         f"CATEGORIA: {category or '(sem categoria)'}\n\n"
         f"COMENTÁRIO A REVISAR:\n{commentary}"
     )
-    return _ask_verdict(client, _EDITORIAL_SYSTEM, user, "editorial")
+    return _ask_verdict(client, _EDITORIAL_ROLE, user, "editorial")
 
 
 # --- 3) Aprovador final ---------------------------------------------------
 
-_APPROVER_SYSTEM = (
-    "Você é o aprovador final de publicação de um telejornal. Recebe os "
-    "vereditos de dois revisores independentes (verificador de fatos e revisor "
-    "editorial), cada um com APROVADO/REPROVADO e um motivo. Sua decisão: "
-    "LIBERADO apenas se AMBOS aprovaram e não há motivo residual relevante; "
-    "BLOQUEADO se qualquer um reprovou. Ao bloquear, consolide em uma frase "
-    "objetiva o que o comentarista precisa corrigir. "
-    'Responda SOMENTE um objeto JSON: {"veredito": "LIBERADO" ou "BLOQUEADO", '
-    '"motivo": "vazio se liberado; instrução de correção se bloqueado"}.'
+_APPROVER_ROLE = (
+    "SEU PAPEL: APROVADOR FINAL\n"
+    "\n"
+    "Você não relê o comentário: recebe os vereditos dos dois revisores "
+    "independentes (verificador de fatos e revisor editorial), cada um com "
+    "APROVADO ou REPROVADO e um motivo. Sua decisão: LIBERADO apenas se AMBOS "
+    "aprovaram e não há motivo residual relevante; BLOQUEADO se qualquer um "
+    "reprovou. Ao bloquear, consolide numa única frase objetiva, dirigida ao "
+    "comentarista, o que ele precisa corrigir — some os dois motivos se ambos "
+    "reprovaram.\n"
+    "\n"
+    'Rótulos do "veredito" no seu papel: "LIBERADO" ou "BLOQUEADO" (e NÃO '
+    '"APROVADO"/"REPROVADO"). O motivo é vazio se LIBERADO; se BLOQUEADO, é a '
+    "instrução de correção."
 )
 
 
@@ -210,9 +351,10 @@ def final_approval(client, fact_ok, fact_reason, editorial_ok, editorial_reason)
         resp = client.messages.create(
             model=REVIEW_MODEL,
             max_tokens=REVIEW_MAX_TOKENS,
-            system=_APPROVER_SYSTEM,
+            system=_build_review_system(_APPROVER_ROLE),
             messages=[{"role": "user", "content": user}],
         )
+        log_usage(TAG, "final_approval", resp.usage)
         _bump_metric("claude_calls:final_approval")
         data = _parse_json_obj(_extract_text(resp))
         if data is not None:

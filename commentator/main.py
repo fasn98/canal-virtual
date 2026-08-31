@@ -10,6 +10,7 @@ from review import (
     ReviewUnavailable,
     REVIEW_ENABLED,
     MAX_CORRECTION_ATTEMPTS,
+    log_usage,
 )
 
 r = redis.Redis(host="redis", port=6379, decode_responses=True, socket_timeout=10)
@@ -19,7 +20,7 @@ r = redis.Redis(host="redis", port=6379, decode_responses=True, socket_timeout=1
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "").strip()
 # Modelo padrão. Pode ser trocado sem rebuild via env (ex.: "claude-sonnet-4-5",
 # "claude-sonnet-5"). Se o modelo configurado falhar, o fallback curto entra.
-ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-5").strip()
+ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-5").strip()
 # Tamanho alvo do comentário, em palavras. ~300 palavras ≈ 2 min de fala.
 # Reduza (ex.: 40) durante testes para o ciclo passar rápido — sem mudar código.
 TARGET_COMMENTARY_WORDS = int(os.environ.get("TARGET_COMMENTARY_WORDS", "300"))
@@ -169,23 +170,102 @@ def build_fallback_commentary(title, category):
     )
 
 
-def build_commentary_prompt(title, summary, category, correction=None):
+# --- Prompt de geração do comentário --------------------------------------
+# `COMMENTARY_SYSTEM` é o bloco ESTÁTICO: persona, regras, estilo e um exemplo
+# de calibragem — idêntico byte a byte em toda chamada e em toda notícia. Vai
+# no `system` com breakpoint de cache. Precisa passar do mínimo cacheável do
+# modelo (1024 tokens no Sonnet); qualquer edição aqui invalida o cache.
+# O conteúdo DINÂMICO (título, resumo, categoria, tamanho-alvo e o bloco de
+# reescrita) vai só na mensagem 'user' — ver build_commentary_user().
+COMMENTARY_SYSTEM = (
+    "Você é um comentarista de telejornal. A cada notícia você recebe um "
+    "título, um resumo e uma categoria, e escreve um comentário analítico em "
+    "português do Brasil sobre aquela notícia. O texto será convertido em áudio "
+    "e lido no ar por uma voz sintética, então precisa funcionar falado: frases "
+    "de comprimento moderado, encadeamento claro, nada que só faça sentido no "
+    "papel.\n"
+    "\n"
+    "NATUREZA DO TEXTO\n"
+    "\n"
+    "É um comentário — uma interpretação SOBRE a notícia —, não a locução da "
+    "notícia em si. Não repita o título em forma de manchete nem narre o fato "
+    "como um repórter. Parta do princípio de que o espectador já ouviu a "
+    "notícia; o seu papel é dar contexto, apontar o que está em jogo e ajudar a "
+    "entender os desdobramentos possíveis.\n"
+    "\n"
+    "O QUE O COMENTÁRIO DEVE FAZER\n"
+    "\n"
+    "- Contextualizar o tema: por que isso acontece, o que costuma estar por "
+    "trás desse tipo de acontecimento, como ele se encaixa num quadro maior.\n"
+    "- Apontar implicações: quem é afetado, o que tende a mudar, que decisões "
+    "ou reações são esperáveis.\n"
+    "- Considerar cenários: o que pode vir a seguir, sempre marcado como "
+    'possibilidade e não como certeza ("se o quadro se mantiver, é provável '
+    'que...", "um caminho possível é...").\n'
+    "\n"
+    "REGRA FACTUAL — INEGOCIÁVEL\n"
+    "\n"
+    "Você só pode afirmar como fato aquilo que está no título ou no resumo "
+    "fornecidos, ou que seja dedução direta e inequívoca deles. É PROIBIDO "
+    "introduzir qualquer dado concreto que não venha da fonte: números, "
+    "estatísticas, porcentagens, datas, valores, placares ou resultados de "
+    "votação, nomes próprios, cargos, locais específicos ou citações entre "
+    "aspas. Se falta informação, comente o contexto de forma geral — nunca "
+    "preencha a lacuna com um número ou um nome plausível. Conhecimento geral "
+    "amplo e consolidado (como funciona uma instituição, o que um fenômeno "
+    "costuma provocar) é permitido, desde que não seja apresentado como um fato "
+    "específico daquela notícia.\n"
+    "\n"
+    "TOM E ESTILO\n"
+    "\n"
+    "- Jornalístico, sério, sóbrio. Sem sensacionalismo, sem alarmismo, sem "
+    "apelo emocional forçado, sem ironia.\n"
+    "- Imparcial: não pese a mão contra um dos lados, não adjetive atores de "
+    "forma desigual, não trate uma das partes com mais benevolência que a "
+    "outra.\n"
+    "- Análise é bem-vinda; opinião disfarçada de constatação objetiva não é. "
+    'Ao emitir um juízo, deixe claro que é leitura sua ("a decisão sugere", "o '
+    'movimento indica"), não um fato.\n'
+    "\n"
+    "FORMATO DA SAÍDA\n"
+    "\n"
+    "- Texto corrido em português do Brasil. Sem título, sem subtítulos, sem "
+    "marcadores, sem markdown, sem emojis. Comece direto no comentário.\n"
+    "- De um a três parágrafos curtos. O comprimento-alvo em palavras é "
+    "informado na mensagem do usuário; respeite-o com tolerância de cerca de "
+    "dez por cento.\n"
+    "- Não use aspas para simular declarações. Não invente falas.\n"
+    "\n"
+    "REESCRITA\n"
+    "\n"
+    "Quando a mensagem do usuário indicar que se trata de uma reescrita após "
+    "reprovação, ela trará o motivo da rejeição e a versão anterior. Reescreva "
+    "o comentário do zero corrigindo exatamente aquele problema, sem "
+    "reintroduzir os erros da versão anterior e sem criar novos, mantendo-se "
+    "estritamente dentro do título e do resumo.\n"
+    "\n"
+    "EXEMPLO DE CALIBRAGEM\n"
+    "\n"
+    "Suponha um título sobre um banco central que manteve os juros e um resumo "
+    "que cita apenas 'inflação persistente' e 'incerteza global', sem números. "
+    "É adequado escrever que a decisão sinaliza cautela, que ela evita tanto "
+    "reacender a inflação quanto travar a atividade de forma abrupta, e que os "
+    "próximos indicadores de preços e de emprego devem definir o momento de "
+    "voltar a mexer na taxa. NÃO é adequado escrever que a decisão foi 'por 7 "
+    "votos a 2', que a inflação 'está em 5,4%' ou que 'o mercado esperava "
+    "corte' — nada disso veio da fonte."
+)
+
+
+def build_commentary_user(title, summary, category, correction=None):
+    """Parte DINÂMICA do prompt de geração: só o que muda a cada notícia.
+    Vai na mensagem 'user', depois do `system` estático e cacheado."""
     alvo = TARGET_COMMENTARY_WORDS
     base = (
-        "Você é um comentarista de telejornal. Escreva um comentário analítico, "
-        "em português do Brasil, sobre a notícia abaixo.\n\n"
         f"TÍTULO: {title}\n"
         f"RESUMO: {summary or '(sem resumo disponível)'}\n"
-        f"CATEGORIA: {category}\n\n"
-        "Regras:\n"
-        f"- Aproximadamente {alvo} palavras (tolerância de ~10%).\n"
-        "- Análise jornalística objetiva: contextualize o tema, aponte causas, "
-        "implicações e cenários possíveis.\n"
-        "- NÃO invente fatos, números, nomes ou declarações que não estejam no "
-        "título ou no resumo. Se faltar informação, comente o contexto de forma geral.\n"
-        "- É um comentário/interpretação SOBRE a notícia, não a leitura da notícia em si.\n"
-        "- Texto corrido, em português, sem título, sem marcadores, sem markdown. "
-        "Comece direto no comentário.\n"
+        f"CATEGORIA: {category}\n"
+        f"TAMANHO-ALVO: aproximadamente {alvo} palavras (tolerância de ~10%).\n"
     )
     if correction:
         prev_text, motivo = correction
@@ -209,15 +289,23 @@ def generate_commentary(title, summary, category, correction=None):
     `correction=(texto_anterior, motivo)` pede uma reescrita corrigida."""
     try:
         client = get_anthropic_client()
-        prompt = build_commentary_prompt(title, summary, category, correction)
+        user_msg = build_commentary_user(title, summary, category, correction)
         # ~3.2 tokens por palavra-alvo, com piso e teto de segurança.
         max_toks = min(2000, max(400, int(TARGET_COMMENTARY_WORDS * 3.2)))
 
         resp = client.messages.create(
             model=ANTHROPIC_MODEL,
             max_tokens=max_toks,
-            messages=[{"role": "user", "content": prompt}],
+            # Bloco estático primeiro, com breakpoint de cache; a notícia
+            # (dinâmica) vai na mensagem 'user'.
+            system=[{
+                "type": "text",
+                "text": COMMENTARY_SYSTEM,
+                "cache_control": {"type": "ephemeral"},
+            }],
+            messages=[{"role": "user", "content": user_msg}],
         )
+        log_usage(TAG, "commentary", resp.usage)
         bump_metric("claude_calls:commentary")
 
         text = "\n".join(
@@ -424,6 +512,12 @@ def main():
             print(f"{TAG} → falha ao criar consumer group, tentando de novo:", e)
             time.sleep(3)
 
+    print(
+        f"{TAG} → config: modelo={ANTHROPIC_MODEL}, "
+        f"alvo_comentário={TARGET_COMMENTARY_WORDS} palavras, "
+        f"timeout_api={ANTHROPIC_TIMEOUT_SEC:g}s.",
+        flush=True,
+    )
     print(
         f"{TAG} → recuperação automática ativa "
         f"(timeout={STUCK_TIMEOUT_MS}ms, max_tentativas={MAX_DELIVERY_ATTEMPTS}, "
