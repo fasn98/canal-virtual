@@ -1,0 +1,26 @@
+# Só afeta builds cujo contexto é a RAIZ do repo. Hoje isso é apenas o serviço
+# "worldin3" (docker-compose.yml). Os demais serviços buildam com contexto na
+# própria pasta (build: ./collector, etc.) e NÃO são afetados por este arquivo.
+#
+# Objetivo: manter o contexto de build enxuto — sem os vídeos/imagens de
+# volumes/, sem o .git, sem o zip de backup.
+
+.git
+.gitignore
+.ruff_cache
+**/__pycache__
+*.pyc
+
+volumes/
+canal-virtual.zip
+*.zip
+*.mp4
+*.log
+preview_*.png
+preview_*.mp4
+teste_*.mp4
+f7053cd9143e1bb6.mp4
+final.mp4
+
+.env
+.env.save

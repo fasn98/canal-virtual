@@ -22,7 +22,30 @@ DEEPL_API_KEY = os.environ.get("DEEPL_API_KEY", "").strip()
 TARGET_LANGUAGE = os.environ.get("TARGET_LANGUAGE", "PT-BR").strip() or "PT-BR"
 DEEPL_TIMEOUT_SEC = int(os.environ.get("DEEPL_TIMEOUT_SEC", "10"))
 
+# Fontes cujo conteúdo JÁ chega no idioma-alvo do canal quando o canal é PT.
+# Para essas o classifier PULA a chamada à DeepL: economiza cota do plano
+# gratuito e evita que a DeepL "reescreva" um texto que já está correto em
+# PT-BR. Rótulos batem com o campo `source` do collector ("Agência Brasil").
+# Sobrescrevível via env PT_NATIVE_SOURCES (lista separada por vírgula).
+PT_NATIVE_SOURCES = {
+    s.strip().lower()
+    for s in (os.environ.get("PT_NATIVE_SOURCES") or "Agência Brasil").split(",")
+    if s.strip()
+}
+
 TAG = "Translator"
+
+
+def is_already_target_language(source):
+    """True quando uma notícia da fonte `source` já vem no idioma-alvo e não há
+    o que traduzir. Hoje: fontes PT-nativas (PT_NATIVE_SOURCES) quando
+    TARGET_LANGUAGE é português. Se o canal for para outro idioma, mesmo essas
+    fontes voltam a ser traduzidas normalmente."""
+    if not source:
+        return False
+    if not TARGET_LANGUAGE.upper().startswith("PT"):
+        return False
+    return source.strip().lower() in PT_NATIVE_SOURCES
 
 
 def _api_base(key):

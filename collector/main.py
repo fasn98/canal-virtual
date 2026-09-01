@@ -3,7 +3,9 @@ import os
 import redis
 import feedparser
 import hashlib
+import html
 import json
+import re
 
 import requests
 
@@ -63,11 +65,56 @@ GUARDIAN_SECTIONS = [
 GUARDIAN_PAGE_SIZE = int(os.environ.get("GUARDIAN_PAGE_SIZE", "15"))
 GUARDIAN_TIMEOUT_SEC = float(os.environ.get("GUARDIAN_TIMEOUT_SEC", "15"))
 
+# --- Agência Brasil (EBC): RSS oficial, já em português (pt-br) ---
+# Feeds listados em https://agenciabrasil.ebc.com.br/feed/ . Padrão de URL:
+# https://agenciabrasil.ebc.com.br/rss/<categoria>/feed.xml
+# Categorias disponíveis: geral, politica, economia, internacional, justica,
+# educacao, esportes, saude, direitos-humanos, alem do agregado
+# "ultimasnoticias". Por padrão monitoramos as 4 prioritárias. Sobrescreva com
+# AGENCIABRASIL_FEED_URLS (lista separada por vírgula) para mudar o conjunto.
+# Mesmo idioma do BBC_FEED_URLS: vazio/ausente => usa os 4 feeds padrão.
+# IMPORTANTE: este conteúdo JÁ vem em PT-BR — o classifier NÃO o manda para a
+# DeepL (ver PT_NATIVE_SOURCES no serviço classifier). O rótulo de fonte é
+# "Agência Brasil", no mesmo padrão de "BBC"/"Guardian".
+DEFAULT_AGENCIABRASIL_FEEDS = [
+    "https://agenciabrasil.ebc.com.br/rss/geral/feed.xml",
+    "https://agenciabrasil.ebc.com.br/rss/politica/feed.xml",
+    "https://agenciabrasil.ebc.com.br/rss/economia/feed.xml",
+    "https://agenciabrasil.ebc.com.br/rss/internacional/feed.xml",
+]
+AGENCIABRASIL_FEED_URLS = [
+    u.strip()
+    for u in (
+        os.environ.get("AGENCIABRASIL_FEED_URLS")
+        or ",".join(DEFAULT_AGENCIABRASIL_FEEDS)
+    ).split(",")
+    if u.strip()
+]
+
 POLL_INTERVAL_SEC = int(os.environ.get("POLL_INTERVAL_SEC", "60"))
+
+_TAG_RE = re.compile(r"<[^>]+>")
+_WS_RE = re.compile(r"\s+")
 
 
 def _uid(seed):
     return hashlib.sha256(seed.encode("utf-8")).hexdigest()[:16]
+
+
+def _clean_html_summary(raw, limit=600):
+    """Os feeds da Agência Brasil trazem o corpo da matéria em HTML (logo em
+    <img>, links, bloco 'Leia mais'). Tira as tags, resolve entidades, colapsa
+    espaços e corta em `limit` chars — o resto do pipeline (classificação,
+    prompt do comentário, verificador de fatos) espera resumo em texto puro,
+    como já chega de BBC/Guardian."""
+    if not raw:
+        return ""
+    text = _TAG_RE.sub(" ", raw)
+    text = html.unescape(text)
+    text = _WS_RE.sub(" ", text).strip()
+    if len(text) > limit:
+        text = text[:limit].rsplit(" ", 1)[0].rstrip() + "…"
+    return text
 
 
 def fetch_bbc():
@@ -168,9 +215,51 @@ def fetch_guardian():
     return items
 
 
+def fetch_agenciabrasil():
+    """Lê os feeds RSS da Agência Brasil (EBC). Mesmo padrão da BBC: uma falha
+    em um feed é logada e não impede os demais. O conteúdo já vem em PT-BR e
+    cada item sai rotulado com source="Agência Brasil"."""
+    items = []
+    for url in AGENCIABRASIL_FEED_URLS:
+        try:
+            feed = feedparser.parse(url)
+            if getattr(feed, "bozo", 0) and not feed.entries:
+                print(
+                    f"{TAG} → Agência Brasil: feed ilegível ({url}): "
+                    f"{getattr(feed, 'bozo_exception', '?')}",
+                    flush=True,
+                )
+                continue
+            count = 0
+            for entry in feed.entries:
+                title = entry.get("title", "").strip()
+                summary = _clean_html_summary(entry.get("summary", ""))
+                link = entry.get("link", "").strip()
+                published = entry.get("published", "")
+                if not title or not link:
+                    continue
+                items.append({
+                    "id": _uid(link),
+                    "title": title,
+                    "summary": summary,
+                    "link": link,
+                    "published": published,
+                    "source": "Agência Brasil",
+                })
+                count += 1
+            print(f"{TAG} → Agência Brasil: {count} itens de {url}", flush=True)
+        except Exception as e:
+            print(
+                f"{TAG} → Agência Brasil: ERRO ao ler {url}: "
+                f"{type(e).__name__}: {e}",
+                flush=True,
+            )
+    return items
+
+
 def collect_all():
     """Junta todas as fontes. Cada dict já vem com `source` preenchido."""
-    return fetch_bbc() + fetch_guardian()
+    return fetch_bbc() + fetch_guardian() + fetch_agenciabrasil()
 
 
 def main():
@@ -180,6 +269,11 @@ def main():
             f" + Guardian ({len(GUARDIAN_SECTIONS)} seções)"
             if GUARDIAN_API_KEY
             else " (Guardian desativado: sem GUARDIAN_API_KEY)"
+        )
+        + (
+            f" + Agência Brasil ({len(AGENCIABRASIL_FEED_URLS)} feeds)"
+            if AGENCIABRASIL_FEED_URLS
+            else " (Agência Brasil desativada: AGENCIABRASIL_FEED_URLS vazia)"
         ),
         flush=True,
     )

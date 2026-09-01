@@ -59,7 +59,7 @@ MAX_CORRECTION_ATTEMPTS = int(os.environ.get("MAX_CORRECTION_ATTEMPTS", "2"))
 REVIEW_MODEL = (
     os.environ.get("REVIEW_MODEL", "").strip()
     or os.environ.get("ANTHROPIC_MODEL", "").strip()
-    or "claude-sonnet-5"
+    or "claude-haiku-4-5"
 )
 REVIEW_MAX_TOKENS = int(os.environ.get("REVIEW_MAX_TOKENS", "400"))
 
