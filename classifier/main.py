@@ -3,7 +3,7 @@ import os
 import redis
 import json
 
-from translate import translate_text, TARGET_LANGUAGE
+from translate import translate_text, TARGET_LANGUAGE, is_already_target_language
 
 r = redis.Redis(host="redis", port=6379, decode_responses=True, socket_timeout=10)
 
@@ -75,6 +75,7 @@ def handle_event(event_id, data):
     # tradução.
     title_original = data.get("title", "")
     summary = data.get("summary", "")
+    source = data.get("source", "")
     text = f"{title_original} {summary}".strip()
 
     category, confidence = classify(text)
@@ -83,7 +84,19 @@ def handle_event(event_id, data):
     # idioma-alvo do canal. `title_original` segue adiante apenas para
     # rastreabilidade/debug. Se a DeepL falhar, translate_text() devolve o
     # título original e o pipeline segue (degradação graciosa).
-    title = translate_text(title_original, TARGET_LANGUAGE)
+    #
+    # Fontes que já entregam PT-BR (ex.: "Agência Brasil") pulam a DeepL: não há
+    # o que traduzir, e chamar a API só gastaria cota e arriscaria reescrever um
+    # texto já correto.
+    if is_already_target_language(source):
+        title = title_original
+        print(
+            f"{TAG} → fonte {source!r} já em {TARGET_LANGUAGE}; tradução "
+            f"ignorada: {title_original!r}",
+            flush=True,
+        )
+    else:
+        title = translate_text(title_original, TARGET_LANGUAGE)
 
     msg = {
         "id": data.get("id", ""),
@@ -94,7 +107,7 @@ def handle_event(event_id, data):
         "confidence": confidence,
         "link": data.get("link", ""),
         "published": data.get("published", ""),
-        "source": data.get("source", ""),
+        "source": source,
         "timestamp": time.time(),
     }
 

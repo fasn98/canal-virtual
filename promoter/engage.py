@@ -50,7 +50,7 @@ ANTHROPIC_WORKSPACE_ID = os.environ.get("ANTHROPIC_WORKSPACE_ID", "").strip()
 ENGAGEMENT_MODEL = (
     os.environ.get("ENGAGEMENT_MODEL", "").strip()
     or os.environ.get("ANTHROPIC_MODEL", "").strip()
-    or "claude-sonnet-4-5"
+    or "claude-haiku-4-5"
 )
 ANTHROPIC_TIMEOUT_SEC = float(os.environ.get("ANTHROPIC_TIMEOUT_SEC", "30"))
 

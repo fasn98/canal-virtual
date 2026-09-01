@@ -18,9 +18,11 @@ r = redis.Redis(host="redis", port=6379, decode_responses=True, socket_timeout=1
 # --- Geração de comentário via Claude (Anthropic) ---
 # A chave real vai no .env (ANTHROPIC_API_KEY) — nunca commitada.
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "").strip()
-# Modelo padrão. Pode ser trocado sem rebuild via env (ex.: "claude-sonnet-4-5",
+# Modelo padrão. Pode ser trocado sem rebuild via env (ex.: "claude-haiku-4-5",
 # "claude-sonnet-5"). Se o modelo configurado falhar, o fallback curto entra.
-ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-5").strip()
+# Nota: em claude-haiku-4-5 o mínimo cacheável é 4096 tok, então o cache de
+# prompt em COMMENTARY_SYSTEM (~1470 tok) fica inativo (não gera erro).
+ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5").strip()
 # Tamanho alvo do comentário, em palavras. ~300 palavras ≈ 2 min de fala.
 # Reduza (ex.: 40) durante testes para o ciclo passar rápido — sem mudar código.
 TARGET_COMMENTARY_WORDS = int(os.environ.get("TARGET_COMMENTARY_WORDS", "300"))

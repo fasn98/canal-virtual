@@ -20,6 +20,7 @@ __pycache__/
 
 # Segredos / backups locais
 *.save
+*.bak
 
 # Arquivos temporários / previews
 canal-virtual.zip

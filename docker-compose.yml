@@ -14,19 +14,11 @@ services:
       - canalnet
     environment:
       - PYTHONUNBUFFERED=1
-      # Fontes de notícia. BBC = RSS (5 feeds por padrão: world, business,
-      # technology, science_and_environment, health). Sobrescreva BBC_FEED_URLS
-      # (lista separada por vírgula) só se quiser mudar o conjunto.
-      - BBC_FEED_URLS=${BBC_FEED_URLS:-}
-      # The Guardian = Open Platform (API oficial). Sem GUARDIAN_API_KEY a fonte
-      # é ignorada e só a BBC roda. Chave developer: 5.000 req/dia, 12/s,
-      # uso não-comercial, com atribuição/link para theguardian.com.
-      - GUARDIAN_API_KEY=${GUARDIAN_API_KEY:-}
-      - GUARDIAN_SECTIONS=${GUARDIAN_SECTIONS:-}
-      - GUARDIAN_PAGE_SIZE=${GUARDIAN_PAGE_SIZE:-15}
-      # Intervalo entre ciclos de coleta. Suba para 120 em produção para ficar
-      # sob o limite diário do Guardian (6 seções * 86400/60 ≈ 8.6k > 5k).
-      - POLL_INTERVAL_SEC=${POLL_INTERVAL_SEC:-60}
+      - BBC_FEED_URLS=${BBC_FEED_URLS}
+      - GUARDIAN_API_KEY=
+      - GUARDIAN_SECTIONS=
+      - AGENCIABRASIL_FEED_URLS=${AGENCIABRASIL_FEED_URLS}
+      - POLL_INTERVAL_SEC=${POLL_INTERVAL_SEC}
     depends_on:
       - redis
 
@@ -38,16 +30,13 @@ services:
       - canalnet
     environment:
       - PYTHONUNBUFFERED=1
-      # Tradução automática do título (DeepL) logo no início do pipeline.
-      - DEEPL_API_KEY=${DEEPL_API_KEY:-}
-      # Idioma-alvo do canal (formato de código da DeepL). Pode ser diferente
-      # por instância/canal no futuro.
-      - TARGET_LANGUAGE=${TARGET_LANGUAGE:-PT-BR}
-      - DEEPL_TIMEOUT_SEC=${DEEPL_TIMEOUT_SEC:-10}
-      # Recuperação automática de mensagens travadas no consumer group.
-      - STUCK_MESSAGE_TIMEOUT_MS=${STUCK_MESSAGE_TIMEOUT_MS:-60000}
-      - MAX_DELIVERY_ATTEMPTS=${MAX_DELIVERY_ATTEMPTS:-3}
-      - STUCK_SCAN_INTERVAL_SEC=${STUCK_SCAN_INTERVAL_SEC:-30}
+      - DEEPL_API_KEY=${DEEPL_API_KEY}
+      - TARGET_LANGUAGE=${TARGET_LANGUAGE}
+      - PT_NATIVE_SOURCES=${PT_NATIVE_SOURCES:-Agência Brasil}
+      - DEEPL_TIMEOUT_SEC=10
+      - STUCK_MESSAGE_TIMEOUT_MS=60000
+      - MAX_DELIVERY_ATTEMPTS=3
+      - STUCK_SCAN_INTERVAL_SEC=30
     depends_on:
       - redis
       - collector
@@ -60,26 +49,15 @@ services:
       - canalnet
     environment:
       - PYTHONUNBUFFERED=1
-      # Geração do comentário via Claude (Anthropic). A chave real vai no .env.
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
-      # Necessário para chaves identity-linked (senão a API responde 400).
-      - ANTHROPIC_WORKSPACE_ID=${ANTHROPIC_WORKSPACE_ID:-}
-      - ANTHROPIC_MODEL=${ANTHROPIC_MODEL:-claude-sonnet-4-5}
-      # Tamanho alvo do comentário (palavras). ~300 ≈ 2 min de fala.
-      # Reduza (ex.: 40) só para testes rápidos — NÃO subir para produção assim.
-      - TARGET_COMMENTARY_WORDS=${TARGET_COMMENTARY_WORDS:-300}
-      # Revisão editorial entre commentator e synthesizer: verificador de fatos
-      # + revisor editorial + aprovador final (3 chamadas Claude por notícia
-      # ÚNICA; o cache por id evita repetir em reexibições). false = publica o
-      # comentário direto, sem revisão.
-      - ENABLE_EDITORIAL_REVIEW=${ENABLE_EDITORIAL_REVIEW:-true}
-      # Tentativas de correção após reprovação, antes de DESCARTAR o item.
-      - MAX_CORRECTION_ATTEMPTS=${MAX_CORRECTION_ATTEMPTS:-2}
-      # Modelo das revisões (padrão: o mesmo do comentário, ANTHROPIC_MODEL).
-      - REVIEW_MODEL=${REVIEW_MODEL:-}
-      - STUCK_MESSAGE_TIMEOUT_MS=${STUCK_MESSAGE_TIMEOUT_MS:-60000}
-      - MAX_DELIVERY_ATTEMPTS=${MAX_DELIVERY_ATTEMPTS:-3}
-      - STUCK_SCAN_INTERVAL_SEC=${STUCK_SCAN_INTERVAL_SEC:-30}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - ANTHROPIC_WORKSPACE_ID=${ANTHROPIC_WORKSPACE_ID}
+      - ANTHROPIC_MODEL=${ANTHROPIC_MODEL}
+      - TARGET_COMMENTARY_WORDS=${TARGET_COMMENTARY_WORDS}
+      - ENABLE_EDITORIAL_REVIEW=true
+      - MAX_CORRECTION_ATTEMPTS=2
+      - STUCK_MESSAGE_TIMEOUT_MS=60000
+      - MAX_DELIVERY_ATTEMPTS=3
+      - STUCK_SCAN_INTERVAL_SEC=30
     depends_on:
       - redis
       - classifier
@@ -92,27 +70,73 @@ services:
       - canalnet
     environment:
       - PYTHONUNBUFFERED=1
-      # Gatilho por contagem: 1 chamada promocional a cada N notícias reais
-      # renderizadas (escuta news.block). Produção = 5 (ciclo de ~11 min).
-      - NEWS_PER_PROMO=${NEWS_PER_PROMO:-5}
-      # --- Bot de engajamento no chat ao vivo do YouTube ---
-      # 1 pergunta por bloco (junto com a promoção). Qualquer falha é só
-      # logada — nunca quebra o pipeline. false = desligado.
-      - ENABLE_ENGAGEMENT_BOT=${ENABLE_ENGAGEMENT_BOT:-false}
-      # OAuth2 (agir como o dono do canal). Gere com promoter/get_refresh_token.py.
-      - YOUTUBE_OAUTH_CLIENT_ID=${YOUTUBE_OAUTH_CLIENT_ID:-}
-      - YOUTUBE_OAUTH_CLIENT_SECRET=${YOUTUBE_OAUTH_CLIENT_SECRET:-}
-      - YOUTUBE_OAUTH_REFRESH_TOKEN=${YOUTUBE_OAUTH_REFRESH_TOKEN:-}
-      # ID do vídeo da live 24h (watch?v=...). Vazio = descobre a live ativa.
-      - YOUTUBE_LIVE_VIDEO_ID=${YOUTUBE_LIVE_VIDEO_ID:-}
-      # Pergunta gerada por Claude (mesmo padrão do commentator).
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
-      - ANTHROPIC_WORKSPACE_ID=${ANTHROPIC_WORKSPACE_ID:-}
-      - ANTHROPIC_MODEL=${ANTHROPIC_MODEL:-claude-sonnet-4-5}
-      - ENGAGEMENT_MODEL=${ENGAGEMENT_MODEL:-}
+      - NEWS_PER_PROMO=${NEWS_PER_PROMO}
+      - ENABLE_ENGAGEMENT_BOT=false
+      - YOUTUBE_OAUTH_CLIENT_ID=${YOUTUBE_OAUTH_CLIENT_ID}
+      - YOUTUBE_OAUTH_CLIENT_SECRET=${YOUTUBE_OAUTH_CLIENT_SECRET}
+      - YOUTUBE_OAUTH_REFRESH_TOKEN=${YOUTUBE_OAUTH_REFRESH_TOKEN}
+      - YOUTUBE_LIVE_VIDEO_ID=${YOUTUBE_LIVE_VIDEO_ID}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - ANTHROPIC_WORKSPACE_ID=${ANTHROPIC_WORKSPACE_ID}
+      - ANTHROPIC_MODEL=${ANTHROPIC_MODEL}
     depends_on:
       - redis
       - renderer
+
+  # "O Mundo em 3 Minutos" (Short vertical 3x/dia). NÃO sobe no `up` normal:
+  # profile "worldin3". Loop de agendamento:
+  #   docker compose --profile worldin3 up -d worldin3
+  # Execução manual de uma edição:
+  #   docker compose run --rm worldin3 python -m worldin3.run_once generate
+  #   docker compose run --rm worldin3 python -m worldin3.run_once upload-last
+  worldin3:
+    build:
+      context: .
+      dockerfile: worldin3/Dockerfile
+    container_name: worldin3
+    profiles: ["worldin3"]
+    restart: unless-stopped
+    networks:
+      - canalnet
+    command: ["python", "-m", "worldin3.scheduler", "--loop"]
+    environment:
+      - PYTHONUNBUFFERED=1
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - ANTHROPIC_WORKSPACE_ID=${ANTHROPIC_WORKSPACE_ID}
+      - ANTHROPIC_MODEL=${ANTHROPIC_MODEL}
+      # Revisão editorial DESLIGADA no worldin3 por decisão de produto (01/09):
+      # o encerramento do resumo tem CTA de like/inscrição (WORLDIN3_CLOSING_CTA),
+      # que os 3 revisores barram como "linguagem de rede social". A base factual
+      # do resumo é o comentário por manchete, que já passou pelos 3 revisores
+      # quando cada notícia rodou sozinha (ver worldin3/reviewbridge.py).
+      - ENABLE_EDITORIAL_REVIEW=false
+      - MAX_CORRECTION_ATTEMPTS=2
+      - WORLDIN3_CLOSING_CTA=${WORLDIN3_CLOSING_CTA:-}
+      - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY}
+      - ELEVENLABS_VOICE_ID=${ELEVENLABS_VOICE_ID}
+      - ELEVENLABS_MODEL_ID=${ELEVENLABS_MODEL_ID}
+      # OAuth: MESMO client do bot de chat, refresh token SEPARADO (escopo upload)
+      - YOUTUBE_OAUTH_CLIENT_ID=${YOUTUBE_OAUTH_CLIENT_ID}
+      - YOUTUBE_OAUTH_CLIENT_SECRET=${YOUTUBE_OAUTH_CLIENT_SECRET}
+      - YOUTUBE_OAUTH_REFRESH_TOKEN_UPLOAD=${YOUTUBE_OAUTH_REFRESH_TOKEN_UPLOAD}
+      - YOUTUBE_CHANNEL_HANDLE=${YOUTUBE_CHANNEL_HANDLE}
+      # Agendamento / edição
+      - WORLDIN3_SCHEDULE_TIMES=${WORLDIN3_SCHEDULE_TIMES:-08:00,14:00,20:00}
+      - WORLDIN3_SCHEDULE_TZ=${WORLDIN3_SCHEDULE_TZ:-America/Sao_Paulo}
+      - WORLDIN3_PRIVACY_STATUS=${WORLDIN3_PRIVACY_STATUS:-unlisted}
+      - WORLDIN3_PLAYLIST_ID=${WORLDIN3_PLAYLIST_ID:-}
+      - WORLDIN3_LIVE_URL=${WORLDIN3_LIVE_URL:-}
+      - WORLDIN3_DAILY_CREDIT_BUDGET=${WORLDIN3_DAILY_CREDIT_BUDGET:-12000}
+      # TubeOptimizer (NUNCA automático; só via run_once.py tubeoptimizer)
+      - WORLDIN3_ENABLE_TUBEOPTIMIZER=${WORLDIN3_ENABLE_TUBEOPTIMIZER:-false}
+      - WORLDIN3_TUBEOPTIMIZER_CONTENT_LINE=${WORLDIN3_TUBEOPTIMIZER_CONTENT_LINE:-futurenews}
+      - TUBEOPTIMIZER_BASE_URL=${TUBEOPTIMIZER_BASE_URL:-}
+      - TUBEOPTIMIZER_API_KEY=${TUBEOPTIMIZER_API_KEY:-}
+    volumes:
+      - ./volumes/assets:/app/assets
+      - ./volumes/output:/app/output
+    depends_on:
+      - redis
 
   synthesizer:
     build: ./synthesizer
@@ -124,16 +148,11 @@ services:
       - PYTHONUNBUFFERED=1
       - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY}
       - ELEVENLABS_VOICE_ID=${ELEVENLABS_VOICE_ID}
-      # Freio de gasto diário na ElevenLabs, independente de quantas fontes de
-      # notícia estejam ativas. Plano Creator = 121.038 créditos/mês / 30 ≈
-      # 4.034/dia; padrão 4000 com margem. Ao estourar, o synthesizer reprisa
-      # em rotação uma notícia de hoje que já tem áudio pago (índice
-      # today:completed_items:AAAA-MM-DD), sem novo gasto; só cai no "pular e
-      # manter o último bloco" se ainda não houver nenhuma notícia paga hoje.
-      - DAILY_CREDIT_BUDGET=${DAILY_CREDIT_BUDGET:-4000}
-      - STUCK_MESSAGE_TIMEOUT_MS=${STUCK_MESSAGE_TIMEOUT_MS:-60000}
-      - MAX_DELIVERY_ATTEMPTS=${MAX_DELIVERY_ATTEMPTS:-3}
-      - STUCK_SCAN_INTERVAL_SEC=${STUCK_SCAN_INTERVAL_SEC:-30}
+      - ELEVENLABS_MODEL_ID=${ELEVENLABS_MODEL_ID}
+      - DAILY_CREDIT_BUDGET=${DAILY_CREDIT_BUDGET}
+      - STUCK_MESSAGE_TIMEOUT_MS=60000
+      - MAX_DELIVERY_ATTEMPTS=3
+      - STUCK_SCAN_INTERVAL_SEC=30
     depends_on:
       - redis
       - commentator
@@ -148,41 +167,17 @@ services:
       - canalnet
     environment:
       - PYTHONUNBUFFERED=1
-      - STUCK_MESSAGE_TIMEOUT_MS=${STUCK_MESSAGE_TIMEOUT_MS:-60000}
-      - MAX_DELIVERY_ATTEMPTS=${MAX_DELIVERY_ATTEMPTS:-3}
-      - STUCK_SCAN_INTERVAL_SEC=${STUCK_SCAN_INTERVAL_SEC:-30}
-      # Proteção: itens de TESTE (id fora do formato de produção, prefixo de
-      # teste conhecido, ou manchete "TESTE ...") NÃO sobrescrevem o final.mp4
-      # de produção — renderizam em /app/output/final_test.mp4 para inspeção.
-      # ALLOW_TEST_ON_AIR=true libera um teste a ir ao ar mesmo assim.
-      - ALLOW_TEST_ON_AIR=${ALLOW_TEST_ON_AIR:-false}
-      # Alerta em log se o final.mp4 de produção ficar este tempo (segundos)
-      # sem ser atualizado por um item real bem-sucedido. Só loga, não para nada.
-      - STALENESS_ALERT_AFTER_SEC=${STALENESS_ALERT_AFTER_SEC:-1200}
-      # Lip-sync real do avatar via D-ID (POC, plano Pro). false = pipeline
-      # atual (avatar estático); true = tenta D-ID e cai no estático se falhar.
-      - ENABLE_LIPSYNC=${ENABLE_LIPSYNC:-false}
-      - DID_API_KEY=${DID_API_KEY:-}
-      # TV virtual: moldura no cenário (assets/tv_frame.png) com um b-roll por
-      # bloco de NEWS_PER_PROMO notícias, escolhido pela notícia principal.
-      # Fontes em cascata: 1) nosso canal no YouTube; 2) Pexels; 3) clipe local.
-      # Qualquer falha em cascata => no pior caso o bloco sai sem a TV.
-      - ENABLE_TV=${ENABLE_TV:-true}
-      # Fonte 1 — canal próprio no YouTube (busca via YouTube Data API v3,
-      # download sob demanda via yt-dlp). Sem YOUTUBE_API_KEY => pula pro Pexels.
-      - ENABLE_TV_YOUTUBE=${ENABLE_TV_YOUTUBE:-true}
-      - YOUTUBE_API_KEY=${YOUTUBE_API_KEY:-}
-      - YOUTUBE_CHANNEL_HANDLE=${YOUTUBE_CHANNEL_HANDLE:-@FutureVerse-Beyond}
-      - YOUTUBE_CHANNEL_ID=${YOUTUBE_CHANNEL_ID:-}
-      - TV_YT_CLIP_SECONDS=${TV_YT_CLIP_SECONDS:-90}
-      # Fonte 2 — Pexels.
-      - PEXELS_API_KEY=${PEXELS_API_KEY:-}
-      # Precisa bater com o valor do promoter para a troca de vídeo cair junto
-      # com o ciclo promocional.
-      - NEWS_PER_PROMO=${NEWS_PER_PROMO:-5}
-      # Canto superior esquerdo da moldura na composição 1920x1080 (opcional).
-      - TV_X=${TV_X:-60}
-      - TV_Y=${TV_Y:-180}
+      - ENABLE_LIPSYNC=false
+      - ALLOW_TEST_ON_AIR=false
+      - ENABLE_TV=true
+      - ENABLE_TV_YOUTUBE=true
+      - YOUTUBE_API_KEY=${YOUTUBE_API_KEY}
+      - YOUTUBE_CHANNEL_HANDLE=${YOUTUBE_CHANNEL_HANDLE}
+      - PEXELS_API_KEY=${PEXELS_API_KEY}
+      - NEWS_PER_PROMO=${NEWS_PER_PROMO}
+      - STUCK_MESSAGE_TIMEOUT_MS=60000
+      - MAX_DELIVERY_ATTEMPTS=3
+      - STUCK_SCAN_INTERVAL_SEC=30
     depends_on:
       - synthesizer
       - redis
@@ -199,10 +194,8 @@ services:
       - canalnet
     environment:
       - RTMP_URL=${RTMP_URL}
-      # Mix de áudio: música de fundo em 15% do volume original por padrão.
-      - MUSIC_VOLUME=${MUSIC_VOLUME:-0.15}
-      # Boost da voz da narradora (TTS ElevenLabs), que sai muito abaixo do nível de fala.
-      - VOICE_VOLUME=${VOICE_VOLUME:-5.0}
+      - MUSIC_VOLUME=${MUSIC_VOLUME}
+      - VOICE_VOLUME=${VOICE_VOLUME}
     depends_on:
       - renderer
     volumes:
@@ -215,28 +208,17 @@ services:
     restart: always
     networks:
       - canalnet
-    # Exposta no host (e, via firewall do Contabo, na internet) para o painel
-    # de controle externo (Replit) consultar. SOMENTE LEITURA e protegida por
-    # token: sem o header X-API-Key correto todo endpoint /status/* responde
-    # 401. Mude o lado esquerdo (ex.: 127.0.0.1:8090) se quiser fechar no host.
     ports:
       - "8090:8090"
     environment:
       - PYTHONUNBUFFERED=1
-      # Token fixo do header "X-API-Key". SEM ele configurado a API responde
-      # 503 a tudo (fail-closed). Gere com `openssl rand -hex 32`.
       - METRICS_API_KEY=${METRICS_API_KEY}
-      # Mesmo teto do synthesizer, só para calcular "restante" no /status/elevenlabs.
-      - DAILY_CREDIT_BUDGET=${DAILY_CREDIT_BUDGET:-4000}
-      # Espelham a config do renderer: dizem se o lip-sync está ligado e dão a
-      # credencial para consultar o saldo real de créditos do D-ID.
-      - ENABLE_LIPSYNC=${ENABLE_LIPSYNC:-false}
-      - DID_API_KEY=${DID_API_KEY:-}
-      - DID_API_URL=${DID_API_URL:-https://api.d-id.com}
-      # Containers que o /status/pipeline espera ver "running" (lista o que falta).
-      - EXPECTED_CONTAINERS=${EXPECTED_CONTAINERS:-redis,collector,classifier,commentator,promoter,synthesizer,renderer,streamer,metrics-api}
+      - DAILY_CREDIT_BUDGET=${DAILY_CREDIT_BUDGET}
+      - ENABLE_LIPSYNC=false
+      - DID_API_KEY=
+      - DID_API_URL=https://api.d-id.com
+      - EXPECTED_CONTAINERS=redis,collector,classifier,commentator,promoter,synthesizer,renderer,streamer,metrics-api
     volumes:
-      # Só leitura: usado para listar quais containers estão up (/status/pipeline).
       - /var/run/docker.sock:/var/run/docker.sock:ro
     depends_on:
       - redis
