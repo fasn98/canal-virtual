@@ -223,6 +223,39 @@ services:
     depends_on:
       - redis
 
+  # --- Monitor 24h do canal — agente SÓ DE SAÍDA (sem portas) ---------------
+  # Reporta um snapshot de saúde + heartbeat para o dashboard /canal hospedado
+  # no app Replit (TUBEOPTIMIZER). Nada novo fica exposto na VM: o agente só
+  # disca pra fora. Socket do Docker montado rw porque as Fases 2/3 vão
+  # reiniciar serviços (nesta Fase 1 o agente só LÊ). Ver docs/canal-monitor-plan.md.
+  ops-agent:
+    build: ./ops-agent
+    container_name: ops-agent
+    restart: unless-stopped
+    networks:
+      - canalnet
+    environment:
+      - PYTHONUNBUFFERED=1
+      # URL raiz do app Replit e segredo compartilhado com o dashboard.
+      - CANAL_APP_BASE_URL=${CANAL_APP_BASE_URL:-https://tube-oprtimizer.replit.app}
+      - CANAL_OPS_SHARED_SECRET=${CANAL_OPS_SHARED_SECRET}
+      # metrics-api interno (mesma chave já usada pelo painel).
+      - METRICS_API_URL=http://metrics-api:8090
+      - METRICS_API_KEY=${METRICS_API_KEY}
+      - REDIS_HOST=redis
+      - COMPOSE_PROJECT_NAME=canal-virtual
+      - OPS_AGENT_REPORT_INTERVAL_SEC=${OPS_AGENT_REPORT_INTERVAL_SEC:-20}
+      # Espelham o worldin3 para calcular o próximo disparo e ler o gasto do dia.
+      - WORLDIN3_SCHEDULE_TIMES=${WORLDIN3_SCHEDULE_TIMES:-08:00,14:00,20:00}
+      - WORLDIN3_SCHEDULE_TZ=${WORLDIN3_SCHEDULE_TZ:-America/Sao_Paulo}
+      - WORLDIN3_DAILY_CREDIT_BUDGET=${WORLDIN3_DAILY_CREDIT_BUDGET:-12000}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./volumes/output:/app/output:ro
+    depends_on:
+      - redis
+      - metrics-api
+
 networks:
   canalnet:
     driver: bridge
