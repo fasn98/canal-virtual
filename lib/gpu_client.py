@@ -58,9 +58,11 @@ CONFIG (tudo via env, sem rebuild)
   GPU_POLL_INTERVAL_SEC      opcional, padrão 5. Intervalo entre polls de
                              status do pod (query GraphQL `pod`).
   GPU_READY_TIMEOUT_SEC      opcional, padrão 120. Teto do polling de
-                             {pod_url}/health depois do pod RUNNING — RunPod
-                             RUNNING só confirma o container de pé, não que
-                             o servidor de TTS/lip-sync já carregou.
+                             {pod_url}/ready depois do pod RUNNING — RunPod
+                             RUNNING só confirma o container de pé, e o
+                             /health do gateway responde 200 mesmo com os
+                             workers (Chatterbox/MuseTalk) mortos. /ready só
+                             dá 200 quando os dois workers estão de pé.
 
   GPU_SERVER_URL             URL raiz do servidor de inferência dentro do pod
                              (ex.: https://<pod>-8000.proxy.runpod.net). Usada
@@ -974,26 +976,34 @@ def _generate_video_real(
 
 def _wait_inference_ready(pod_url: str, *, timeout: float | None = None) -> None:
     """
-    RunPod RUNNING só confirma o container de pé — o servidor de TTS/lip-sync
-    pode levar mais alguns segundos pra carregar os modelos. Faz polling em
-    {pod_url}/health a cada 3s até 200 OK ou estourar `timeout`
-    (GPU_READY_TIMEOUT_SEC, padrão 120s).
+    RunPod RUNNING só confirma o container de pé. O gateway de inferência sobe
+    rápido, mas os workers (Chatterbox/TTS e MuseTalk/lip-sync) são processos
+    separados que ainda precisam carregar modelo — e o `/health` do gateway
+    responde 200 mesmo com os workers mortos (check raso; foi o que deixou o
+    renderer mandar trabalho pra um pod meio-morto em 2026-09-04).
+
+    Por isso o polling é em `/ready`, que só devolve 200 quando os DOIS
+    workers estão de pé; enquanto não, dá 503 com o status de cada um. Poll a
+    cada 3s até 200 ou estourar `timeout` (GPU_READY_TIMEOUT_SEC, padrão
+    120s). Em timeout a GpuError carrega o último corpo do `/ready` — que diz
+    QUAL worker não subiu.
     """
     to = _resolve_float_env("GPU_READY_TIMEOUT_SEC", DEFAULT_READY_TIMEOUT_SEC, timeout)
     deadline = time.monotonic() + to
-    last_err = None
+    last = "sem resposta"
     while time.monotonic() < deadline:
         try:
-            resp = requests.get(f"{pod_url}/health", timeout=10)
+            resp = requests.get(f"{pod_url}/ready", timeout=10)
             if resp.status_code == 200:
                 return
-            last_err = f"HTTP {resp.status_code}"
+            body = " ".join((resp.text or "").split())
+            last = f"HTTP {resp.status_code}" + (f" {body[:400]}" if body else "")
         except requests.exceptions.RequestException as e:
-            last_err = e
+            last = str(e)
         time.sleep(3)
     raise GpuError(
-        f"servidor de inferência não respondeu /health em {to:.0f}s "
-        f"após o pod RUNNING ({pod_url}): {last_err}"
+        f"servidor de inferência não ficou pronto em {to:.0f}s após o pod "
+        f"RUNNING ({pod_url}) — último /ready: {last}"
     )
 
 
