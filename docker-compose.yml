@@ -219,6 +219,11 @@ services:
       - MUSETALK_CHROMA_SIMILARITY=${MUSETALK_CHROMA_SIMILARITY:-0.14}
       - MUSETALK_CHROMA_BLEND=${MUSETALK_CHROMA_BLEND:-0.06}
       - MUSETALK_CHROMA_DESPILL=${MUSETALK_CHROMA_DESPILL:-true}
+      # Enquadramento do apresentador (renderer/musetalk.py). Escolhido no e2e
+      # 2026-09-06: Y=336 esconde a borda reta atrás do lower third; borda OFF.
+      - MUSETALK_PRESENTER_X=${MUSETALK_PRESENTER_X:-1208}
+      - MUSETALK_PRESENTER_Y=${MUSETALK_PRESENTER_Y:-336}
+      - MUSETALK_PRESENTER_BORDER=${MUSETALK_PRESENTER_BORDER:-false}
     depends_on:
       - synthesizer
       - redis

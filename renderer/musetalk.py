@@ -108,12 +108,14 @@ REJECTED_DIRNAME = "_rejected"
 
 # --- Fundo + posição do quadro do apresentador (env, sem rebuild) -----------
 # O MuseTalk devolve um close quadrado (~572px). Ele entra em escala NATIVA
-# sobre o fundo abaixo, ancorado em (X, Y). Defaults: lado direito, base
-# tucada atrás do lower third (y>=800), como o avatar do caminho D-ID.
+# sobre o fundo abaixo, ancorado em (X, Y). Escolhido no e2e 2026-09-06
+# (frames A-F): X=1208 (âncora à direita), Y=336 (base tucada atrás do lower
+# third, y>=800, escondendo a borda inferior reta do recorte), BORDER=false
+# (o drawbox branco fazia parecer janela de chamada de vídeo).
 BACKGROUND_NAME = os.environ.get("MUSETALK_BG_NAME", "studio_bg_novo.png")
 PRESENTER_X = int(os.environ.get("MUSETALK_PRESENTER_X", "1208"))
 PRESENTER_Y = int(os.environ.get("MUSETALK_PRESENTER_Y", "336"))
-PRESENTER_BORDER = os.environ.get("MUSETALK_PRESENTER_BORDER", "true").strip().lower() in (
+PRESENTER_BORDER = os.environ.get("MUSETALK_PRESENTER_BORDER", "false").strip().lower() in (
     "1", "true", "yes", "on",
 )
 
