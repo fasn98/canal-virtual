@@ -195,6 +195,8 @@ services:
       - MUSETALK_QA_MIN_SEC=${MUSETALK_QA_MIN_SEC:-}
       - MUSETALK_QA_MAX_AV_SKEW_SEC=${MUSETALK_QA_MAX_AV_SKEW_SEC:-}
       - MUSETALK_QA_SILENCE_DB=${MUSETALK_QA_SILENCE_DB:-}
+      # Chunking do TTS (Chatterbox trunca texto longo): chars por bloco /tts.
+      - MUSETALK_TTS_MAX_CHARS=${MUSETALK_TTS_MAX_CHARS:-}
       # Log persistente do ciclo do pod GPU em /app/output/gpu_client.log
       # (volume ./volumes/output). Vazio nesta var desliga.
       - GPU_CLIENT_LOG_MAX_BYTES=${GPU_CLIENT_LOG_MAX_BYTES:-5000000}

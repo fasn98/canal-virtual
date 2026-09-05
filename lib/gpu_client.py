@@ -145,6 +145,9 @@ import base64
 import datetime
 import json
 import os
+import re
+import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -842,7 +845,11 @@ def tts(text: str, *, out_path: str | None = None, server_url: str | None = None
     Text-to-speech no servidor de inferência: POST {servidor}/tts.
     Só roda com GPU_LIPSYNC_REAL=true. Devolve o caminho do áudio gerado.
 
-    CONFIRME: corpo esperado (JSON {"text": ...}?) e formato da saída (mp3/wav).
+    CONFIRMADO (matriz 2026-09-05): corpo JSON {"text": ...}, resposta
+    audio/wav (24 kHz mono). ATENÇÃO: o Chatterbox tem teto de duração —
+    texto que geraria mais de ~40 s é cortado, e comentário inteiro
+    (~150 s) trunca pra ~20-30 s ou crasha 500. Para texto longo use
+    tts_chunked(), não esta função direto.
     """
     if not _real_enabled():
         raise GpuError(
@@ -853,13 +860,154 @@ def tts(text: str, *, out_path: str | None = None, server_url: str | None = None
         raise GpuError("tts(): texto vazio.")
     server = _resolve_gpu_server_url(server_url)
     timeout = _resolve_inference_timeout(None)
-    out = out_path or os.path.join(tempfile.gettempdir(), "gpu_tts.mp3")
+    out = out_path or os.path.join(tempfile.gettempdir(), "gpu_tts.wav")
 
     _log(f"MODO REAL — POST {server}{_TTS_PATH} ({len(str(text))} chars, timeout {timeout}s)")
     return _post_inference(
         server,
         _TTS_PATH,
-        json_body={"text": str(text)},  # CONFIRME
+        json_body={"text": str(text)},
+        out_path=out,
+        timeout=timeout,
+    )
+
+
+# --- TTS com chunking por frase (contorna o teto do Chatterbox) ---------
+# O Chatterbox não segmenta: manda o texto inteiro pro modelo. A matriz de
+# 2026-09-05 mostrou que só sai completo com <= ~450 chars por chamada
+# (ratio dur_real/esperada 0.8-1.07); acima disso corta em 40 s exatos, e
+# um comentário de notícia (~1700 chars) trunca pra ~25 s. tts_chunked()
+# divide o texto em blocos de frases <= MUSETALK_TTS_MAX_CHARS (default 350,
+# com margem sobre os 450), faz um POST /tts por bloco e concatena os WAVs
+# num único 24 kHz mono. O gate de QA de renderer/musetalk.py roda depois,
+# sobre o WAV concatenado.
+DEFAULT_TTS_MAX_CHARS = 350
+_SENT_SPLIT_RE = re.compile(r"(?<=[.!?…;:])\s+")
+_COMMA_SPLIT_RE = re.compile(r"(?<=,)\s+")
+
+
+def _chunk_text_for_tts(text: str, max_chars: int) -> list[str]:
+    """Divide `text` em blocos de <= max_chars respeitando fronteira de frase.
+    Frases sozinhas maiores que max_chars são sub-quebradas por vírgula e, em
+    último caso, por espaço."""
+    text = re.sub(r"\s+", " ", (text or "").strip())
+    if not text:
+        return []
+
+    pieces: list[str] = []
+    for sent in _SENT_SPLIT_RE.split(text):
+        sent = sent.strip()
+        if not sent:
+            continue
+        if len(sent) <= max_chars:
+            pieces.append(sent)
+            continue
+        for sub in _COMMA_SPLIT_RE.split(sent):
+            sub = sub.strip()
+            while len(sub) > max_chars:
+                cut = sub.rfind(" ", 0, max_chars)
+                if cut <= 0:
+                    cut = max_chars
+                pieces.append(sub[:cut].strip())
+                sub = sub[cut:].strip()
+            if sub:
+                pieces.append(sub)
+
+    chunks: list[str] = []
+    cur = ""
+    for pc in pieces:
+        if not cur:
+            cur = pc
+        elif len(cur) + 1 + len(pc) <= max_chars:
+            cur = f"{cur} {pc}"
+        else:
+            chunks.append(cur)
+            cur = pc
+    if cur:
+        chunks.append(cur)
+    return chunks
+
+
+def _concat_wavs(wav_paths: list[str], out_path: str) -> str:
+    """Concatena WAVs num único 24 kHz mono s16le via ffmpeg. 1 entrada só é
+    apenas re-amostrada. Levanta GpuError em falha."""
+    if not wav_paths:
+        raise GpuError("_concat_wavs: nada a concatenar")
+    if len(wav_paths) == 1:
+        cmd = ["ffmpeg", "-y", "-v", "error", "-i", wav_paths[0],
+               "-ar", "24000", "-ac", "1", "-c:a", "pcm_s16le", out_path]
+    else:
+        cmd = ["ffmpeg", "-y", "-v", "error"]
+        for w in wav_paths:
+            cmd += ["-i", w]
+        n = len(wav_paths)
+        filt = "".join(f"[{i}:a]" for i in range(n)) + f"concat=n={n}:v=0:a=1[a]"
+        cmd += ["-filter_complex", filt, "-map", "[a]",
+                "-ar", "24000", "-ac", "1", "-c:a", "pcm_s16le", out_path]
+    r = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    if r.returncode != 0 or not os.path.isfile(out_path) or os.path.getsize(out_path) == 0:
+        raise GpuError(f"concat de WAV falhou (rc={r.returncode}): {r.stderr[-800:]}")
+    return out_path
+
+
+def tts_chunked(text: str, *, out_path: str, max_chars: int | None = None,
+                server_url: str | None = None) -> str:
+    """TTS de texto longo: divide em blocos de frases, um POST /tts por bloco,
+    concatena num WAV 24 kHz mono em `out_path`. Devolve `out_path`.
+
+    max_chars: default env MUSETALK_TTS_MAX_CHARS ou DEFAULT_TTS_MAX_CHARS."""
+    if not _real_enabled():
+        raise GpuError("tts_chunked(): GPU_LIPSYNC_REAL != true.")
+    mc = int(max_chars or os.environ.get("MUSETALK_TTS_MAX_CHARS", "") or DEFAULT_TTS_MAX_CHARS)
+    chunks = _chunk_text_for_tts(str(text), mc)
+    if not chunks:
+        raise GpuError("tts_chunked(): texto vazio.")
+    server = _resolve_gpu_server_url(server_url)
+    _log(f"tts_chunked: {len(str(text))} chars -> {len(chunks)} bloco(s) (<= {mc} ch/bloco)")
+
+    tmpdir = tempfile.mkdtemp(prefix="tts_chunks_")
+    parts: list[str] = []
+    try:
+        for i, ch in enumerate(chunks):
+            pth = os.path.join(tmpdir, f"{i:03d}.wav")
+            _log(f"  bloco {i + 1}/{len(chunks)} ({len(ch)} ch)")
+            tts(ch, out_path=pth, server_url=server)
+            if not os.path.isfile(pth) or os.path.getsize(pth) == 0:
+                raise GpuError(f"tts_chunked: bloco {i} não gerou áudio")
+            parts.append(pth)
+        _concat_wavs(parts, out_path)
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+    _log(f"tts_chunked: WAV concatenado -> {out_path} ({os.path.getsize(out_path)} B)")
+    return out_path
+
+
+def lipsync_audio(audio_path: str, *, out_path: str | None = None,
+                  server_url: str | None = None) -> str:
+    """Lip-sync a partir de um WAV pronto: POST {servidor}/lipsync. O áudio já
+    vem do tts_chunked(), então NÃO se passa texto. Devolve o caminho do MP4.
+
+    CONFIRME: o corpo exato do /lipsync deste gateway (inference_server/main.py)
+    não foi capturado. Tentativa: JSON {"audio_b64": <wav em base64>}. Se der
+    422, o campo é outro — ajustar na 1ª sessão de pod (fetch /openapi.json).
+    """
+    if not _real_enabled():
+        raise GpuError("lipsync_audio(): GPU_LIPSYNC_REAL != true.")
+    if not audio_path or not os.path.isfile(audio_path):
+        raise GpuError(f"lipsync_audio(): áudio inexistente: {audio_path!r}")
+    server = _resolve_gpu_server_url(server_url)
+    timeout = _resolve_generate_timeout(None)  # lip-sync é lento como /generate
+    out = out_path or os.path.join(tempfile.gettempdir(), "gpu_lipsync.mp4")
+    with open(audio_path, "rb") as fh:
+        b64 = base64.b64encode(fh.read()).decode("ascii")
+    _log(
+        f"MODO REAL — POST {server}{_LIPSYNC_PATH} "
+        f"(wav {os.path.getsize(audio_path)} B, timeout {timeout:g}s)"
+    )
+    return _post_inference(
+        server,
+        _LIPSYNC_PATH,
+        json_body={"audio_b64": b64},  # CONFIRME
         out_path=out,
         timeout=timeout,
     )

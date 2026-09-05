@@ -6,8 +6,13 @@ NEM importa este módulo nesse caso). Isolado igual a renderer/lipsync.py: o
 renderer só chama compose_presenter_block().
 
 FLUXO (AVATAR_PROVIDER=musetalk), por notícia:
-  1. get_presenter_video(): lib/gpu_client.generate_video() -> POST
-     {GPU_SERVER_URL}/generate. Texto -> MP4 1920x... com A VOZ EMBUTIDA.
+  1. get_presenter_video():
+       a. lib/gpu_client.tts_chunked() -> vários POST {GPU_SERVER_URL}/tts
+          (texto dividido em blocos de frases <= MUSETALK_TTS_MAX_CHARS, porque
+          o Chatterbox trunca texto longo) -> WAV 24kHz mono concatenado;
+       b. gate de QA sobre o WAV (_validate_presenter_media);
+       c. lib/gpu_client.lipsync_audio() -> POST {GPU_SERVER_URL}/lipsync ->
+          MP4 com A VOZ EMBUTIDA.
      Cache por id em MUSETALK_DIR/{id}.mp4 (notícia antiga não muda; poupa GPU).
   2. compose_presenter_block(): o /generate devolve um CLOSE QUADRADO (~572px),
      não uma cena. Então o fundo do estúdio (studio_bg_novo.png) é a BASE
@@ -44,10 +49,10 @@ TAG = "MuseTalk"
 # build (docker-compose.yml). Por ora o caminho testado é
 # `python3 -m renderer.test_musetalk` na raiz do repo.
 try:
-    from lib.gpu_client import generate_video, gpu_session, GpuError
+    from lib.gpu_client import GpuError, gpu_session, lipsync_audio, tts_chunked
 except ImportError:  # execução fora da raiz do repo
     sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-    from lib.gpu_client import generate_video, gpu_session, GpuError
+    from lib.gpu_client import GpuError, gpu_session, lipsync_audio, tts_chunked
 
 MUSETALK_DIR = os.environ.get("MUSETALK_DIR", "/app/assets/musetalk")
 
@@ -68,6 +73,14 @@ MUSETALK_DIR = os.environ.get("MUSETALK_DIR", "/app/assets/musetalk")
 #   MUSETALK_QA_MIN_SEC         piso absoluto de duração de áudio (default 3).
 #   MUSETALK_QA_MAX_AV_SKEW_SEC defasagem vídeo x áudio tolerada (default 1.5).
 #   MUSETALK_QA_SILENCE_DB      mean_volume abaixo disso = mudo (default -50).
+#
+# --- TTS com chunking (lib/gpu_client.tts_chunked) ------------------------
+# O Chatterbox não segmenta texto: comentário inteiro numa chamada trunca
+# pra ~25 s ou crasha 500 (matriz 2026-09-05). get_presenter_video() manda o
+# texto por tts_chunked(), que divide em blocos de frases e concatena os WAVs.
+#   MUSETALK_TTS_MAX_CHARS      chars por bloco /tts (default 350; a matriz
+#                               mostrou 100% completo até ~450, teto em 40 s
+#                               acima disso).
 def _qa_bool(name, default):
     return os.environ.get(name, str(default)).strip().lower() in ("1", "true", "yes", "on")
 
@@ -185,8 +198,9 @@ def layout_lowerthird(title):
 
 def get_presenter_video(news_id, text, *, out_dir=None):
     """
-    MP4 (cena + voz) do apresentador para esta notícia via
-    lib/gpu_client.generate_video(). Cache por id: {out_dir}/{news_id}.mp4 já
+    MP4 (cena + voz) do apresentador: TTS com chunking por frase
+    (lib/gpu_client.tts_chunked) -> gate de QA no WAV -> lip-sync
+    (lib/gpu_client.lipsync_audio). Cache por id: {out_dir}/{news_id}.mp4 já
     existente e > 0 bytes é reusado (0 GPU). Levanta RuntimeError em falha.
     """
     out_dir = out_dir or MUSETALK_DIR
@@ -206,19 +220,34 @@ def get_presenter_video(news_id, text, *, out_dir=None):
         raise RuntimeError(f"texto vazio para {news_id}; nada a gerar.")
 
     print(
-        f"{TAG} → Gerando vídeo do apresentador para {news_id} "
-        f"({len(str(text))} chars) — ISTO GASTA GPU (ligando o pod)...",
+        f"{TAG} → Gerando apresentador para {news_id} ({len(str(text))} chars) "
+        f"— TTS com chunking + lip-sync no pod GPU...",
         flush=True,
     )
-    res = None
+    wav_tmp = os.path.join(out_dir, f".{news_id}.tts.wav")
+    have_video = False
     try:
         with gpu_session() as pod_url:
-            res = generate_video(str(text), out_path=out_path, seed=None, server_url=pod_url)
+            # 1) TTS por blocos de frase (<= MUSETALK_TTS_MAX_CHARS) -> WAV 24k
+            #    mono. Contorna o teto/truncamento do Chatterbox em texto longo
+            #    (matriz 2026-09-05: comentário inteiro trunca pra ~25 s / 500).
+            tts_chunked(str(text), out_path=wav_tmp, server_url=pod_url)
+            # 2) QA no áudio concatenado ANTES do lip-sync — barato e pega TTS
+            #    ruim cedo, sem gastar GPU no lip-sync de um áudio já reprovado.
+            try:
+                _validate_presenter_media(wav_tmp, text)
+            except RuntimeError as e:
+                _reject_media(wav_tmp, out_dir, news_id, f"TTS reprovada no QA — {e}")
+                raise RuntimeError(
+                    f"TTS de {news_id} reprovada no QA de áudio — {e}"
+                ) from e
+            # 3) lip-sync a partir do WAV -> MP4 final do apresentador.
+            lipsync_audio(wav_tmp, out_path=out_path, server_url=pod_url)
+            have_video = os.path.isfile(out_path) and os.path.getsize(out_path) > 0
     except GpuError as e:
-        if res is not None:
-            # A geração terminou OK; só o desligamento do pod falhou. NÃO
-            # jogamos fora o vídeo já pronto — mas gritamos bem alto, porque
-            # o pod pode ter ficado ligado cobrando sem ninguém notar.
+        if have_video:
+            # Vídeo pronto; só o desligamento do pod falhou. Não jogamos fora,
+            # mas gritamos alto — o pod pode ter ficado ligado cobrando.
             print(
                 f"{TAG} → ⚠️ ATENÇÃO: vídeo gerado OK mas o ciclo do pod falhou "
                 f"({e}) — CONFIRA NO RUNPOD SE O POD FICOU LIGADO.",
@@ -226,27 +255,27 @@ def get_presenter_video(news_id, text, *, out_dir=None):
             )
         else:
             raise RuntimeError(f"ciclo do pod GPU falhou para {news_id}: {e}") from e
+    finally:
+        try:
+            os.remove(wav_tmp)
+        except OSError:
+            pass
 
-    if not isinstance(res, dict) or res.get("stub"):
-        raise RuntimeError(
-            f"generate_video não rodou o modo real para {news_id} — confira "
-            f"GPU_LIPSYNC_REAL=true / GPU_SERVER_URL / INFERENCE_SERVER_API_KEY. "
-            f"Resposta: {res}"
-        )
-    path = res.get("output_path")
-    if not path or not os.path.exists(path) or os.path.getsize(path) == 0:
-        raise RuntimeError(f"generate_video não produziu MP4 válido para {news_id}: {res}")
+    if not os.path.isfile(out_path) or os.path.getsize(out_path) == 0:
+        raise RuntimeError(f"lip-sync não produziu MP4 válido para {news_id}: {out_path}")
 
+    # QA final no MP4 (redundante com o QA do WAV acima, mas pega mux/lip-sync
+    # torto — defasagem A/V, áudio perdido no /lipsync, etc.).
     try:
-        _validate_presenter_media(path, text)
+        _validate_presenter_media(out_path, text)
     except RuntimeError as e:
-        _reject_media(path, out_dir, news_id, str(e))
+        _reject_media(out_path, out_dir, news_id, str(e))
         raise RuntimeError(
-            f"geração do apresentador para {news_id} reprovada no QA de áudio — {e}"
+            f"vídeo do apresentador para {news_id} reprovado no QA — {e}"
         ) from e
 
-    print(f"{TAG} → vídeo do apresentador: {path} ({os.path.getsize(path)} bytes)", flush=True)
-    return path
+    print(f"{TAG} → apresentador pronto: {out_path} ({os.path.getsize(out_path)} bytes)", flush=True)
+    return out_path
 
 
 def _probe_dims(path):
