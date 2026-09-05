@@ -140,14 +140,16 @@ def main():
     #    N blocos -> N /tts -> concat WAV -> on_wav(wav) -> N /lipsync -> concat MP4.
     calls = {"tts": 0, "lipsync": 0}
 
+    TTS_S, LS_S = 2.0, 5.0  # o "worker" devolve vídeo 2.5x mais longo que o áudio
+
     def fake_tts(text, *, out_path=None, server_url=None):
         calls["tts"] += 1
-        _wav(out_path, 2.0)
+        _wav(out_path, TTS_S)
         return out_path
 
     def fake_lipsync(audio_path, *, out_path=None, server_url=None):
         calls["lipsync"] += 1
-        _mp4(out_path, 2.0)
+        _mp4(out_path, LS_S)  # mais longo de propósito -> _fit_block_video corta
         return out_path
 
     G.tts, G.lipsync_audio = fake_tts, fake_lipsync   # monkeypatch (script sai depois de main)
@@ -161,12 +163,16 @@ def main():
         max_chars=350, server_url="http://fake",
     )
     n = len(_chunk_text_for_tts(LONG, 350))
+    mp4_d = _dur(mp4_out)
+    # com o fix, a duração final ~= n * TTS_S (áudio), NÃO n * LS_S (vídeo cru)
+    trimmed_ok = abs(mp4_d - n * TTS_S) < 1.0
     gp_ok = (calls["tts"] == n and calls["lipsync"] == n
              and os.path.isfile(wav_out) and os.path.isfile(mp4_out)
-             and os.path.getsize(mp4_out) > 0 and seen.get("wav", ("", 0))[0] == wav_out)
-    print(f"[{'OK ' if gp_ok else 'FAIL'}] generate_presenter_chunked: "
-          f"{n} blocos, tts={calls['tts']} lipsync={calls['lipsync']}, "
-          f"on_wav={'sim' if seen else 'não'}, mp4={_dur(mp4_out):.1f}s")
+             and os.path.getsize(mp4_out) > 0 and seen.get("wav", ("", 0))[0] == wav_out
+             and trimmed_ok)
+    print(f"[{'OK ' if gp_ok else 'FAIL'}] generate_presenter_chunked: {n} blocos, "
+          f"tts={calls['tts']} lipsync={calls['lipsync']}, on_wav={'sim' if seen else 'não'}, "
+          f"mp4={mp4_d:.1f}s (esperado ~{n * TTS_S:.0f}s, vídeo cru seria ~{n * LS_S:.0f}s)")
     ok &= gp_ok
 
     # 7b) on_wav que levanta -> aborta ANTES de qualquer /lipsync

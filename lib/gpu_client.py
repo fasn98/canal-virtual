@@ -950,6 +950,35 @@ def _concat_wavs(wav_paths: list[str], out_path: str) -> str:
     return out_path
 
 
+def _ffprobe_duration(path: str) -> float:
+    r = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", path],
+        capture_output=True, text=True, check=False)
+    try:
+        return float((r.stdout or "").strip())
+    except ValueError:
+        return 0.0
+
+
+def _fit_block_video(raw_mp4: str, wav_path: str, out_path: str) -> str:
+    """O musetalk_worker devolve vídeo MAIS LONGO que o áudio — renderiza uma
+    passada fixa do idle video (~1.85x a duração do áudio; a cauda é o rosto
+    "falando" sem som). Corta o vídeo na duração do WAV do bloco e re-muxa com
+    o WAV limpo (dropa a cauda). Normaliza params (30 fps, yuv420p, aac) para o
+    concat final poder rodar `-c copy`."""
+    dur = _ffprobe_duration(wav_path)
+    if dur <= 0:
+        raise GpuError(f"_fit_block_video: WAV sem duração legível: {wav_path!r}")
+    cmd = ["ffmpeg", "-y", "-v", "error", "-i", raw_mp4, "-i", wav_path,
+           "-map", "0:v:0", "-map", "1:a:0", "-t", f"{dur:.3f}",
+           "-r", "30", "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
+           "-c:a", "aac", "-movflags", "+faststart", out_path]
+    r = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    if r.returncode != 0 or not os.path.isfile(out_path) or os.path.getsize(out_path) == 0:
+        raise GpuError(f"_fit_block_video falhou (rc={r.returncode}): {r.stderr[-800:]}")
+    return out_path
+
+
 def _concat_mp4s(mp4_paths: list[str], out_path: str) -> str:
     """Concatena MP4s (mesmos codec/params — vêm todos do mesmo /lipsync) via
     concat demuxer, com `-c copy`; se falhar (params divergiram), re-encoda.
@@ -1065,7 +1094,10 @@ def generate_presenter_chunked(
     3. se `on_wav` foi passado, chama on_wav(wav_out) AQUI — antes de gastar
        GPU no lip-sync. Se levantar, aborta (a exceção sobe).
     4. POST /lipsync por bloco (cada WAV <= ~30 s cabe no ~100 s do proxy);
-    5. concatena os MP4s em `out_path`.
+    5. corta o vídeo de cada bloco na duração do WAV dele (_fit_block_video —
+       o worker devolve vídeo ~1.85x mais longo, com cauda idle sem som) e
+       re-muxa com o WAV limpo;
+    6. concatena os MP4s em `out_path`.
 
     Devolve `out_path`. Levanta GpuError (pod/rede/HTTP) ou o que `on_wav`
     levantar. Limpa os arquivos temporários de bloco sempre.
@@ -1101,11 +1133,13 @@ def generate_presenter_chunked(
 
         mp4s: list[str] = []
         for i, w in enumerate(wavs):
+            raw = os.path.join(tmp, f"ls_raw_{i:03d}.mp4")
             m = os.path.join(tmp, f"ls_{i:03d}.mp4")
             _log(f"  /lipsync bloco {i + 1}/{len(chunks)}")
-            lipsync_audio(w, out_path=m, server_url=server)
-            if not os.path.isfile(m) or os.path.getsize(m) == 0:
+            lipsync_audio(w, out_path=raw, server_url=server)
+            if not os.path.isfile(raw) or os.path.getsize(raw) == 0:
                 raise GpuError(f"bloco {i}: /lipsync não gerou vídeo")
+            _fit_block_video(raw, w, m)  # corta a cauda idle, re-muxa com o WAV limpo
             mp4s.append(m)
 
         _concat_mp4s(mp4s, out_path)
