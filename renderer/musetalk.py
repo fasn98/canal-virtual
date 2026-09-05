@@ -6,13 +6,15 @@ NEM importa este módulo nesse caso). Isolado igual a renderer/lipsync.py: o
 renderer só chama compose_presenter_block().
 
 FLUXO (AVATAR_PROVIDER=musetalk), por notícia:
-  1. get_presenter_video():
-       a. lib/gpu_client.tts_chunked() -> vários POST {GPU_SERVER_URL}/tts
-          (texto dividido em blocos de frases <= MUSETALK_TTS_MAX_CHARS, porque
-          o Chatterbox trunca texto longo) -> WAV 24kHz mono concatenado;
-       b. gate de QA sobre o WAV (_validate_presenter_media);
-       c. lib/gpu_client.lipsync_audio() -> POST {GPU_SERVER_URL}/lipsync ->
-          MP4 com A VOZ EMBUTIDA.
+  1. get_presenter_video() -> lib/gpu_client.generate_presenter_chunked():
+       a. texto dividido em blocos de frases <= MUSETALK_TTS_MAX_CHARS
+          (o Chatterbox trunca texto longo; o proxy do RunPod corta /lipsync
+          em ~100 s);
+       b. POST {GPU_SERVER_URL}/tts por bloco -> WAV 24kHz mono concatenado;
+       c. gate de QA sobre o WAV concatenado (_validate_presenter_media);
+       d. POST {GPU_SERVER_URL}/lipsync por bloco -> MP4 por bloco;
+       e. concatena os MP4s -> vídeo do apresentador com A VOZ EMBUTIDA;
+       f. QA final sobre o MP4 concatenado.
      Cache por id em MUSETALK_DIR/{id}.mp4 (notícia antiga não muda; poupa GPU).
   2. compose_presenter_block(): o /generate devolve um CLOSE QUADRADO (~572px),
      não uma cena. Então o fundo do estúdio (studio_bg_novo.png) é a BASE
@@ -49,10 +51,10 @@ TAG = "MuseTalk"
 # build (docker-compose.yml). Por ora o caminho testado é
 # `python3 -m renderer.test_musetalk` na raiz do repo.
 try:
-    from lib.gpu_client import GpuError, gpu_session, lipsync_audio, tts_chunked
+    from lib.gpu_client import GpuError, generate_presenter_chunked, gpu_session
 except ImportError:  # execução fora da raiz do repo
     sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-    from lib.gpu_client import GpuError, gpu_session, lipsync_audio, tts_chunked
+    from lib.gpu_client import GpuError, generate_presenter_chunked, gpu_session
 
 MUSETALK_DIR = os.environ.get("MUSETALK_DIR", "/app/assets/musetalk")
 
@@ -74,13 +76,15 @@ MUSETALK_DIR = os.environ.get("MUSETALK_DIR", "/app/assets/musetalk")
 #   MUSETALK_QA_MAX_AV_SKEW_SEC defasagem vídeo x áudio tolerada (default 1.5).
 #   MUSETALK_QA_SILENCE_DB      mean_volume abaixo disso = mudo (default -50).
 #
-# --- TTS com chunking (lib/gpu_client.tts_chunked) ------------------------
-# O Chatterbox não segmenta texto: comentário inteiro numa chamada trunca
-# pra ~25 s ou crasha 500 (matriz 2026-09-05). get_presenter_video() manda o
-# texto por tts_chunked(), que divide em blocos de frases e concatena os WAVs.
-#   MUSETALK_TTS_MAX_CHARS      chars por bloco /tts (default 350; a matriz
-#                               mostrou 100% completo até ~450, teto em 40 s
-#                               acima disso).
+# --- Chunking de TTS + lip-sync (lib/gpu_client.generate_presenter_chunked) --
+# O Chatterbox não segmenta texto: comentário inteiro numa chamada de /tts
+# trunca pra ~25 s ou crasha 500 (matriz 2026-09-05). E o proxy do RunPod
+# corta /lipsync em ~100 s: um WAV de ~110 s dá HTTP 524 (2026-09-06). Por
+# isso get_presenter_video() fatia TUDO por bloco de frase: /tts por bloco ->
+# WAV concatenado (QA aqui) -> /lipsync por bloco -> MP4s concatenados.
+#   MUSETALK_TTS_MAX_CHARS      chars por bloco (default 350; a matriz mostrou
+#                               100% completo até ~450, teto em 40 s acima).
+#                               ~350 ch ~= ~25 s de áudio -> cabe no /lipsync.
 def _qa_bool(name, default):
     return os.environ.get(name, str(default)).strip().lower() in ("1", "true", "yes", "on")
 
@@ -198,10 +202,11 @@ def layout_lowerthird(title):
 
 def get_presenter_video(news_id, text, *, out_dir=None):
     """
-    MP4 (cena + voz) do apresentador: TTS com chunking por frase
-    (lib/gpu_client.tts_chunked) -> gate de QA no WAV -> lip-sync
-    (lib/gpu_client.lipsync_audio). Cache por id: {out_dir}/{news_id}.mp4 já
-    existente e > 0 bytes é reusado (0 GPU). Levanta RuntimeError em falha.
+    MP4 (rosto + voz) do apresentador via lib/gpu_client.generate_presenter_chunked:
+    texto -> blocos de frase -> /tts por bloco -> WAV concatenado -> QA no WAV
+    -> /lipsync por bloco -> MP4s concatenados -> QA no MP4. Cache por id:
+    {out_dir}/{news_id}.mp4 já existente e > 0 bytes é reusado (0 GPU). Levanta
+    RuntimeError em falha.
     """
     out_dir = out_dir or MUSETALK_DIR
     os.makedirs(out_dir, exist_ok=True)
@@ -221,28 +226,35 @@ def get_presenter_video(news_id, text, *, out_dir=None):
 
     print(
         f"{TAG} → Gerando apresentador para {news_id} ({len(str(text))} chars) "
-        f"— TTS com chunking + lip-sync no pod GPU...",
+        f"— TTS + lip-sync com chunking no pod GPU...",
         flush=True,
     )
     wav_tmp = os.path.join(out_dir, f".{news_id}.tts.wav")
     have_video = False
+
+    def _qa_wav(wav):
+        # QA no áudio concatenado ANTES do lip-sync — pega TTS ruim cedo, sem
+        # gastar GPU no lip-sync de um áudio já reprovado. Roda dentro de
+        # generate_presenter_chunked(); levantar aqui aborta o pipeline.
+        try:
+            _validate_presenter_media(wav, text)
+        except RuntimeError as e:
+            _reject_media(wav, out_dir, news_id, f"TTS reprovada no QA — {e}")
+            raise RuntimeError(
+                f"TTS de {news_id} reprovada no QA de áudio — {e}"
+            ) from e
+
     try:
         with gpu_session() as pod_url:
-            # 1) TTS por blocos de frase (<= MUSETALK_TTS_MAX_CHARS) -> WAV 24k
-            #    mono. Contorna o teto/truncamento do Chatterbox em texto longo
-            #    (matriz 2026-09-05: comentário inteiro trunca pra ~25 s / 500).
-            tts_chunked(str(text), out_path=wav_tmp, server_url=pod_url)
-            # 2) QA no áudio concatenado ANTES do lip-sync — barato e pega TTS
-            #    ruim cedo, sem gastar GPU no lip-sync de um áudio já reprovado.
-            try:
-                _validate_presenter_media(wav_tmp, text)
-            except RuntimeError as e:
-                _reject_media(wav_tmp, out_dir, news_id, f"TTS reprovada no QA — {e}")
-                raise RuntimeError(
-                    f"TTS de {news_id} reprovada no QA de áudio — {e}"
-                ) from e
-            # 3) lip-sync a partir do WAV -> MP4 final do apresentador.
-            lipsync_audio(wav_tmp, out_path=out_path, server_url=pod_url)
+            # Pipeline chunked: texto -> blocos de frase (<= MUSETALK_TTS_MAX_CHARS)
+            # -> /tts por bloco -> WAV concatenado (wav_tmp) -> _qa_wav -> /lipsync
+            # por bloco -> MP4 concatenado (out_path). Fatiar o lip-sync também é
+            # obrigatório: o proxy do RunPod corta /lipsync em ~100 s, e um
+            # comentário inteiro (~110 s de áudio) dá HTTP 524 numa chamada só.
+            generate_presenter_chunked(
+                str(text), out_path=out_path, wav_out=wav_tmp,
+                on_wav=_qa_wav, server_url=pod_url,
+            )
             have_video = os.path.isfile(out_path) and os.path.getsize(out_path) > 0
     except GpuError as e:
         if have_video:
@@ -262,10 +274,10 @@ def get_presenter_video(news_id, text, *, out_dir=None):
             pass
 
     if not os.path.isfile(out_path) or os.path.getsize(out_path) == 0:
-        raise RuntimeError(f"lip-sync não produziu MP4 válido para {news_id}: {out_path}")
+        raise RuntimeError(f"pipeline não produziu MP4 válido para {news_id}: {out_path}")
 
-    # QA final no MP4 (redundante com o QA do WAV acima, mas pega mux/lip-sync
-    # torto — defasagem A/V, áudio perdido no /lipsync, etc.).
+    # QA final no MP4 concatenado (redundante com o QA do WAV, mas pega
+    # mux/lip-sync torto — defasagem A/V, junção de blocos ruim, etc.).
     try:
         _validate_presenter_media(out_path, text)
     except RuntimeError as e:

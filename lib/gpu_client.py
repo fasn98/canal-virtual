@@ -950,6 +950,37 @@ def _concat_wavs(wav_paths: list[str], out_path: str) -> str:
     return out_path
 
 
+def _concat_mp4s(mp4_paths: list[str], out_path: str) -> str:
+    """Concatena MP4s (mesmos codec/params — vêm todos do mesmo /lipsync) via
+    concat demuxer, com `-c copy`; se falhar (params divergiram), re-encoda.
+    Levanta GpuError em falha."""
+    if not mp4_paths:
+        raise GpuError("_concat_mp4s: nada a concatenar")
+    if len(mp4_paths) == 1:
+        shutil.copyfile(mp4_paths[0], out_path)
+        return out_path
+    lst = out_path + ".concat.txt"
+    with open(lst, "w", encoding="utf-8") as fh:
+        fh.writelines(f"file '{os.path.abspath(p)}'\n" for p in mp4_paths)
+    try:
+        base = ["ffmpeg", "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", lst]
+        r = subprocess.run(base + ["-c", "copy", "-movflags", "+faststart", out_path],
+                           capture_output=True, text=True, check=False)
+        if r.returncode != 0 or not os.path.isfile(out_path) or os.path.getsize(out_path) == 0:
+            r = subprocess.run(
+                base + ["-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
+                        "-c:a", "aac", "-movflags", "+faststart", out_path],
+                capture_output=True, text=True, check=False)
+        if r.returncode != 0 or not os.path.isfile(out_path) or os.path.getsize(out_path) == 0:
+            raise GpuError(f"concat de MP4 falhou (rc={r.returncode}): {r.stderr[-800:]}")
+    finally:
+        try:
+            os.remove(lst)
+        except OSError:
+            pass
+    return out_path
+
+
 def tts_chunked(text: str, *, out_path: str, max_chars: int | None = None,
                 server_url: str | None = None) -> str:
     """TTS de texto longo: divide em blocos de frases, um POST /tts por bloco,
@@ -984,12 +1015,15 @@ def tts_chunked(text: str, *, out_path: str, max_chars: int | None = None,
 
 def lipsync_audio(audio_path: str, *, out_path: str | None = None,
                   server_url: str | None = None) -> str:
-    """Lip-sync a partir de um WAV pronto: POST {servidor}/lipsync. O áudio já
-    vem do tts_chunked(), então NÃO se passa texto. Devolve o caminho do MP4.
+    """Lip-sync a partir de um WAV pronto: POST {servidor}/lipsync. Devolve o
+    caminho do MP4.
 
-    CONFIRME: o corpo exato do /lipsync deste gateway (inference_server/main.py)
-    não foi capturado. Tentativa: JSON {"audio_b64": <wav em base64>}. Se der
-    422, o campo é outro — ajustar na 1ª sessão de pod (fetch /openapi.json).
+    CONFIRMADO (openapi 2026-09-06): LipsyncRequest = {audio_path?, audio_b64?},
+    corpo JSON, resposta video/mp4. Mandamos audio_b64 (base64 do WAV).
+
+    ATENÇÃO: o proxy do RunPod corta a resposta em ~100 s. Um WAV de ~110 s
+    estoura (HTTP 524). Só chame com áudio curto (<= ~30 s) — quem tem texto
+    longo usa generate_presenter_chunked(), que fatia tts+lipsync por bloco.
     """
     if not _real_enabled():
         raise GpuError("lipsync_audio(): GPU_LIPSYNC_REAL != true.")
@@ -1007,10 +1041,78 @@ def lipsync_audio(audio_path: str, *, out_path: str | None = None,
     return _post_inference(
         server,
         _LIPSYNC_PATH,
-        json_body={"audio_b64": b64},  # CONFIRME
+        json_body={"audio_b64": b64},
         out_path=out,
         timeout=timeout,
     )
+
+
+def generate_presenter_chunked(
+    text: str,
+    *,
+    out_path: str,
+    wav_out: str,
+    on_wav=None,
+    max_chars: int | None = None,
+    server_url: str | None = None,
+) -> str:
+    """Pipeline chunked TTS + lip-sync (contorna o teto do Chatterbox E o
+    timeout do proxy do RunPod no /lipsync).
+
+    1. divide `text` em blocos de frase (<= max_chars);
+    2. POST /tts por bloco -> WAV 24 kHz mono; concatena TODOS em `wav_out`
+       (o chamador é dono do arquivo: QA, reject, limpeza);
+    3. se `on_wav` foi passado, chama on_wav(wav_out) AQUI — antes de gastar
+       GPU no lip-sync. Se levantar, aborta (a exceção sobe).
+    4. POST /lipsync por bloco (cada WAV <= ~30 s cabe no ~100 s do proxy);
+    5. concatena os MP4s em `out_path`.
+
+    Devolve `out_path`. Levanta GpuError (pod/rede/HTTP) ou o que `on_wav`
+    levantar. Limpa os arquivos temporários de bloco sempre.
+    """
+    if not _real_enabled():
+        raise GpuError("generate_presenter_chunked(): GPU_LIPSYNC_REAL != true.")
+    mc = int(max_chars or os.environ.get("MUSETALK_TTS_MAX_CHARS", "") or DEFAULT_TTS_MAX_CHARS)
+    chunks = _chunk_text_for_tts(str(text), mc)
+    if not chunks:
+        raise GpuError("generate_presenter_chunked(): texto vazio.")
+    server = _resolve_gpu_server_url(server_url)
+    _log(
+        f"presenter chunked: {len(str(text))} chars -> {len(chunks)} bloco(s) "
+        f"(<= {mc} ch/bloco)"
+    )
+
+    tmp = tempfile.mkdtemp(prefix="presenter_chunks_")
+    try:
+        wavs: list[str] = []
+        for i, ch in enumerate(chunks):
+            w = os.path.join(tmp, f"tts_{i:03d}.wav")
+            _log(f"  /tts bloco {i + 1}/{len(chunks)} ({len(ch)} ch)")
+            tts(ch, out_path=w, server_url=server)
+            if not os.path.isfile(w) or os.path.getsize(w) == 0:
+                raise GpuError(f"bloco {i}: /tts não gerou áudio")
+            wavs.append(w)
+
+        _concat_wavs(wavs, wav_out)
+        _log(f"  WAV concatenado -> {wav_out} ({os.path.getsize(wav_out)} B)")
+
+        if on_wav is not None:
+            on_wav(wav_out)  # pode levantar -> aborta antes do lip-sync
+
+        mp4s: list[str] = []
+        for i, w in enumerate(wavs):
+            m = os.path.join(tmp, f"ls_{i:03d}.mp4")
+            _log(f"  /lipsync bloco {i + 1}/{len(chunks)}")
+            lipsync_audio(w, out_path=m, server_url=server)
+            if not os.path.isfile(m) or os.path.getsize(m) == 0:
+                raise GpuError(f"bloco {i}: /lipsync não gerou vídeo")
+            mp4s.append(m)
+
+        _concat_mp4s(mp4s, out_path)
+        _log(f"  MP4 concatenado -> {out_path} ({os.path.getsize(out_path)} B)")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return out_path
 
 
 def generate_video(
