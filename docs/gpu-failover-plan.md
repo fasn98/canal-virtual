@@ -1,10 +1,14 @@
 # Plano: failover automático de pod GPU (RunPod) — sem GPU livre no host atual
 
-**Status: DOCUMENTADO, NÃO IMPLEMENTADO.** Escrito em 2026-09-05 (sessão anterior
-encerrando por limite). Próxima sessão: revisar as duas confirmações pendentes
-no fim deste arquivo, depois implementar + testar com aprovação explícita antes
-de rodar `podFindAndDeployOnDemand` de verdade (cria pod novo, começa a cobrar
-na hora).
+**Status: IMPLEMENTADO 2026-09-06** em `lib/gpu_client.py`
+(`_failover_deploy`, `_find_available_gpu`, `_volume_datacenter`, `_runpod_rest`,
+`_active_pod_id`/`_set_active_pod_id`; gancho dentro de `start_gpu()` no `except`
+do `podResume`, só quando a mensagem contém "not enough free GPUs" e
+`GPU_FAILOVER_ENABLED != false`). Testes sem rede: `lib/test_gpu_failover.py`.
+As duas confirmações pendentes foram resolvidas: (1) `pre_start.sh` =
+`/workspace/inference_server/pre_start.sh`, com `dockerArgs` de auto-start
+validado nas runs de 06/09; (2) `podFindAndDeployOnDemand` aprovado.
+O texto abaixo é o design original — mantido como referência.
 
 ## Problema
 

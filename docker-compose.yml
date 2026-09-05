@@ -182,6 +182,12 @@ services:
       - GPU_POD_PORT=${GPU_POD_PORT:-8000}
       - GPU_START_TIMEOUT_SEC=${GPU_START_TIMEOUT_SEC:-180}
       - GPU_READY_TIMEOUT_SEC=${GPU_READY_TIMEOUT_SEC:-120}
+      # Failover (docs/gpu-failover-plan.md): podResume falho por "not enough
+      # free GPUs" -> deploya pod novo no volume. REDIS_HOST persiste o pod
+      # ativo (gpu:active_pod_id) entre restarts do renderer.
+      - REDIS_HOST=${REDIS_HOST:-redis}
+      - GPU_FAILOVER_ENABLED=${GPU_FAILOVER_ENABLED:-true}
+      - GPU_MIN_VRAM_GB=${GPU_MIN_VRAM_GB:-20}
       # MuseTalk só atende PRODUÇÃO com este opt-in explícito (além de
       # AVATAR_PROVIDER=musetalk). Sem ele, itens de teste rodam pelo musetalk
       # mas a produção segue pelo caminho D-ID. Falha/QA reprovada no musetalk

@@ -220,7 +220,29 @@ _GENERATE_PATH = "/generate"
 # API GraphQL do RunPod (controle DIRETO do pod, 2026-09-05 — antes ia pelo
 # app no Replit, que ficou instável/desatualizado; ver módulo docstring).
 RUNPOD_GRAPHQL_URL = "https://api.runpod.io/graphql"
+RUNPOD_REST_URL = "https://rest.runpod.io/v1"
 DEFAULT_GPU_POD_PORT = 8000
+
+# --- Failover de pod GPU (docs/gpu-failover-plan.md) --------------------
+# Quando podResume falha com "not enough free GPUs on the host machine",
+# start_gpu() deploya um pod NOVO (podFindAndDeployOnDemand) numa GPU com
+# estoque no MESMO datacenter do network volume, replicando a config do pod
+# antigo + este dockerArgs de auto-start (validado nas runs de 2026-09-06).
+# O novo podId vira o "pod ativo" (chave Redis gpu:active_pod_id, com
+# precedência sobre RUNPOD_POD_ID). O pod antigo fica EXITED — revisão manual.
+#   GPU_FAILOVER_ENABLED     default true. false = podResume falho vira erro.
+#   GPU_MIN_VRAM_GB          default 20 (não aceitar downgrade sem querer).
+#   GPU_FAILOVER_DOCKER_ARGS sobrescreve o dockerArgs abaixo.
+DEFAULT_MIN_VRAM_GB = 20
+_FAILOVER_ERR_MARK = "not enough free GPUs"
+_ACTIVE_POD_REDIS_KEY = "gpu:active_pod_id"
+_DEFAULT_FAILOVER_DOCKER_ARGS = (
+    "bash -c \"sleep 5; "
+    "cp -f /workspace/inference_server/pre_start.sh /pre_start.sh 2>/dev/null; "
+    "chmod +x /pre_start.sh 2>/dev/null; "
+    "nohup bash /workspace/inference_server/boot.sh >/tmp/boot_dockerargs.log 2>&1 & "
+    "/start.sh\""
+)
 
 # Chaves onde o servidor de inferência PODE devolver a URL/caminho do resultado.
 _RESULT_URL_KEYS = (
@@ -332,12 +354,55 @@ def _runpod_api_key() -> str:
     return key
 
 
+def _redis_conn():
+    """Conexão Redis best-effort para o "pod ativo" do failover. None se
+    REDIS_HOST não estiver setado ou a lib não importar (ex.: teste local)."""
+    host = os.environ.get("REDIS_HOST", "").strip()
+    if not host:
+        return None
+    try:
+        import redis
+        return redis.Redis(
+            host=host, port=int(os.environ.get("REDIS_PORT", "6379")),
+            decode_responses=True, socket_timeout=3,
+        )
+    except Exception:  # noqa: BLE001 — Redis é opcional; qualquer falha = sem Redis
+        return None
+
+
+def _active_pod_id() -> str | None:
+    """Pod ativo gravado pelo failover (Redis gpu:active_pod_id). None se não há."""
+    rc = _redis_conn()
+    if rc is None:
+        return None
+    try:
+        v = (rc.get(_ACTIVE_POD_REDIS_KEY) or "").strip()
+        return v or None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _set_active_pod_id(pid: str) -> None:
+    rc = _redis_conn()
+    if rc is None:
+        _log(f"AVISO: sem Redis — pod ativo do failover ({pid}) NÃO foi persistido; "
+             f"atualize RUNPOD_POD_ID/GPU_SERVER_URL no .env à mão.")
+        return
+    try:
+        rc.set(_ACTIVE_POD_REDIS_KEY, pid)
+        _log(f"failover: pod ativo -> Redis {_ACTIVE_POD_REDIS_KEY}={pid}")
+    except Exception as e:  # noqa: BLE001
+        _log(f"AVISO: falha ao gravar pod ativo no Redis: {e}")
+
+
 def _runpod_pod_id(explicit: str | None = None) -> str:
-    pid = (explicit if explicit is not None else os.environ.get("RUNPOD_POD_ID", "")).strip()
+    if explicit is not None and str(explicit).strip():
+        return str(explicit).strip()
+    pid = (_active_pod_id() or os.environ.get("RUNPOD_POD_ID", "")).strip()
     if not pid:
         raise GpuError(
-            "RUNPOD_POD_ID não configurado — necessário pra saber qual pod "
-            "ligar/desligar. É o prefixo da URL de proxy (GPU_SERVER_URL)."
+            "RUNPOD_POD_ID não configurado (nem Redis gpu:active_pod_id) — "
+            "necessário pra saber qual pod ligar/desligar."
         )
     return pid
 
@@ -412,6 +477,121 @@ def _runpod_pod_status(pod_id: str, *, timeout: float) -> dict:
 def _runpod_proxy_url(pod_id: str, port: int | None = None) -> str:
     p = port or int(os.environ.get("GPU_POD_PORT", str(DEFAULT_GPU_POD_PORT)))
     return f"https://{pod_id}-{p}.proxy.runpod.net"
+
+
+# --- Failover: descoberta de GPU + deploy de pod novo ------------------
+
+
+def _runpod_rest(method: str, path: str, *, json_body: dict | None = None,
+                 timeout: float) -> dict | list | None:
+    """GET/PATCH/DELETE na REST API v1 do RunPod. 204 -> None; !=2xx -> GpuError."""
+    try:
+        resp = requests.request(
+            method, f"{RUNPOD_REST_URL}{path}",
+            headers={"Authorization": f"Bearer {_runpod_api_key()}",
+                     "Content-Type": "application/json"},
+            json=json_body, timeout=timeout,
+        )
+    except requests.exceptions.RequestException as e:
+        raise GpuError(f"RunPod REST {method} {path}: {e}") from e
+    if resp.status_code == 204:
+        return None
+    if resp.status_code not in (200, 201):
+        raise GpuError(
+            f"RunPod REST {method} {path} → HTTP {resp.status_code}: {(resp.text or '')[:400]}"
+        )
+    try:
+        return resp.json()
+    except ValueError:
+        return None
+
+
+def _volume_datacenter(network_volume_id: str, *, timeout: float) -> str:
+    """dataCenterId de um network volume (o pod de failover TEM que nascer lá)."""
+    vols = _runpod_rest("GET", "/networkvolumes", timeout=timeout) or []
+    for v in vols:
+        if isinstance(v, dict) and v.get("id") == network_volume_id:
+            dc = v.get("dataCenterId")
+            if dc:
+                return dc
+    raise GpuError(
+        f"failover: network volume {network_volume_id!r} não encontrado ou sem dataCenterId"
+    )
+
+
+def _find_available_gpu(datacenter_id: str, min_vram_gb: int, *, timeout: float) -> tuple[str, float, str]:
+    """(gpuTypeId, preço/h, nome) da GPU mais barata COM ESTOQUE no datacenter e
+    com VRAM >= min_vram_gb. Levanta GpuError se nada servir."""
+    q = (
+        "query { gpuTypes { id displayName memoryInGb "
+        f"lowestPrice(input: {{gpuCount: 1, dataCenterId: {json.dumps(datacenter_id)}}}) "
+        "{ stockStatus uninterruptablePrice } } }"
+    )
+    data = _runpod_graphql(q, timeout=timeout)
+    cands: list[tuple[float, str, str]] = []
+    for g in data.get("gpuTypes") or []:
+        lp = g.get("lowestPrice") or {}
+        pr = lp.get("uninterruptablePrice")
+        if lp.get("stockStatus") and pr and (g.get("memoryInGb") or 0) >= min_vram_gb:
+            cands.append((float(pr), g["id"], g.get("displayName") or g["id"]))
+    if not cands:
+        raise GpuError(
+            f"failover: nenhuma GPU com estoque em {datacenter_id} "
+            f"(VRAM >= {min_vram_gb}GB). Tente de novo em alguns minutos."
+        )
+    cands.sort()
+    pr, gid, name = cands[0]
+    _log(f"failover: GPU escolhida {name!r} ({gid}) ${pr:g}/h em {datacenter_id}")
+    return gid, pr, name
+
+
+def _failover_deploy(old_pod_id: str, *, timeout: float) -> str:
+    """podResume do pod antigo falhou por falta de GPU no host. Deploya um pod
+    NOVO no datacenter do volume, replicando imageName/disk/ports/mount + o
+    dockerArgs de auto-start. Grava o novo id como pod ativo. Devolve o id."""
+    cfg = _runpod_rest("GET", f"/pods/{old_pod_id}", timeout=timeout) or {}
+    nv = cfg.get("networkVolumeId")
+    if not nv:
+        raise GpuError(
+            f"failover: pod {old_pod_id} sem networkVolumeId — sem volume pra "
+            f"montar num pod novo, abortando."
+        )
+    dc = _volume_datacenter(nv, timeout=timeout)
+    min_vram = int(_resolve_float_env("GPU_MIN_VRAM_GB", float(DEFAULT_MIN_VRAM_GB)))
+    gid, price, gname = _find_available_gpu(dc, min_vram, timeout=timeout)
+
+    image = cfg.get("imageName") or "runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404"
+    disk = int(cfg.get("containerDiskInGb") or 30)
+    ports = cfg.get("ports") or ["8888/http", "8000/http", "22/tcp"]
+    ports_s = ",".join(ports) if isinstance(ports, list) else str(ports)
+    mount = cfg.get("volumeMountPath") or "/workspace"
+    docker_args = os.environ.get("GPU_FAILOVER_DOCKER_ARGS", "").strip() or _DEFAULT_FAILOVER_DOCKER_ARGS
+    name = f"failover-{old_pod_id[:8]}-{int(time.time())}"
+
+    q = (
+        "mutation { podFindAndDeployOnDemand(input: {"
+        "cloudType: SECURE gpuCount: 1 "
+        f"gpuTypeId: {json.dumps(gid)} "
+        f"name: {json.dumps(name)} "
+        f"imageName: {json.dumps(image)} "
+        f"containerDiskInGb: {disk} "
+        f"volumeMountPath: {json.dumps(mount)} "
+        f"ports: {json.dumps(ports_s)} "
+        f"networkVolumeId: {json.dumps(nv)} "
+        f"dockerArgs: {json.dumps(docker_args)} "
+        "}) { id } }"
+    )
+    _log(
+        f"⚠️ FAILOVER: deployando pod novo — GPU {gname} ${price:g}/h, volume {nv} @ {dc}. "
+        f"CUSTO POR HORA COMEÇA AGORA; o pod antigo {old_pod_id} fica EXITED (revisar à mão)."
+    )
+    data = _runpod_graphql(q, timeout=timeout)
+    new = (data.get("podFindAndDeployOnDemand") or {}).get("id")
+    if not new:
+        raise GpuError(f"failover: podFindAndDeployOnDemand não devolveu id — {data}")
+    _log(f"failover: pod novo {new} é o pod ATIVO a partir de agora.")
+    _set_active_pod_id(new)
+    return new
 
 
 # --- HTTP de inferência (respostas grandes, timeout longo) ------------
@@ -681,10 +861,20 @@ def start_gpu(
     interval = _resolve_float_env("GPU_POLL_INTERVAL_SEC", DEFAULT_POLL_INTERVAL_SEC, poll_interval)
 
     _log(f"RunPod → podResume({pid})")
-    _runpod_graphql(
-        "mutation { podResume(input: {podId: %s}) { id desiredStatus } }" % json.dumps(pid),
-        timeout=http_to,
-    )
+    try:
+        _runpod_graphql(
+            "mutation { podResume(input: {podId: %s}) { id desiredStatus } }" % json.dumps(pid),
+            timeout=http_to,
+        )
+    except GpuError as e:
+        _failover_on = os.environ.get("GPU_FAILOVER_ENABLED", "true").strip().lower() in (
+            "1", "true", "yes", "on",
+        )
+        if _FAILOVER_ERR_MARK not in str(e) or not _failover_on:
+            raise
+        # host do pod sem GPU livre + failover ligado -> deploya pod novo no
+        # mesmo volume; segue pro polling normal abaixo com o novo pid.
+        pid = _failover_deploy(pid, timeout=http_to)
 
     _log(f"pod pedido; aguardando RUNNING (a cada {interval}s, teto {start_to}s)")
     deadline = time.monotonic() + start_to
