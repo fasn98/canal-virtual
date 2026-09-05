@@ -160,7 +160,9 @@ services:
       - ./volumes/assets:/app/assets
 
   renderer:
-    build: ./renderer
+    build:
+      context: .
+      dockerfile: renderer/Dockerfile
     container_name: renderer
     restart: always
     networks:
@@ -168,6 +170,34 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - ENABLE_LIPSYNC=false
+      - AVATAR_PROVIDER=${AVATAR_PROVIDER:-d-id}
+      - GPU_LIPSYNC_REAL=${GPU_LIPSYNC_REAL:-false}
+      - GPU_SERVER_URL=${GPU_SERVER_URL:-}
+      - INFERENCE_SERVER_API_KEY=${INFERENCE_SERVER_API_KEY:-}
+      - GENERATE_TIMEOUT_SEC=${GENERATE_TIMEOUT_SEC:-1800}
+      # Controle DIRETO do pod na API do RunPod (2026-09-05) — o app Replit
+      # não entra mais no liga/desliga, só RUNPOD_API_KEY/RUNPOD_POD_ID.
+      - RUNPOD_API_KEY=${RUNPOD_API_KEY:-}
+      - RUNPOD_POD_ID=${RUNPOD_POD_ID:-}
+      - GPU_POD_PORT=${GPU_POD_PORT:-8000}
+      - GPU_START_TIMEOUT_SEC=${GPU_START_TIMEOUT_SEC:-180}
+      - GPU_READY_TIMEOUT_SEC=${GPU_READY_TIMEOUT_SEC:-120}
+      # MuseTalk só atende PRODUÇÃO com este opt-in explícito (além de
+      # AVATAR_PROVIDER=musetalk). Sem ele, itens de teste rodam pelo musetalk
+      # mas a produção segue pelo caminho D-ID. Falha/QA reprovada no musetalk
+      # SEMPRE cai no D-ID (ver renderer/main.py:_render_musetalk_block).
+      - MUSETALK_ALLOW_ON_AIR=${MUSETALK_ALLOW_ON_AIR:-false}
+      # QA do áudio que volta do pod (vazio => padrão do código; ver .env.example).
+      - MUSETALK_QA_ENABLED=${MUSETALK_QA_ENABLED:-true}
+      - MUSETALK_QA_CHARS_PER_SEC=${MUSETALK_QA_CHARS_PER_SEC:-}
+      - MUSETALK_QA_MIN_RATIO=${MUSETALK_QA_MIN_RATIO:-}
+      - MUSETALK_QA_MAX_RATIO=${MUSETALK_QA_MAX_RATIO:-}
+      - MUSETALK_QA_MIN_SEC=${MUSETALK_QA_MIN_SEC:-}
+      - MUSETALK_QA_MAX_AV_SKEW_SEC=${MUSETALK_QA_MAX_AV_SKEW_SEC:-}
+      - MUSETALK_QA_SILENCE_DB=${MUSETALK_QA_SILENCE_DB:-}
+      # Log persistente do ciclo do pod GPU em /app/output/gpu_client.log
+      # (volume ./volumes/output). Vazio nesta var desliga.
+      - GPU_CLIENT_LOG_MAX_BYTES=${GPU_CLIENT_LOG_MAX_BYTES:-5000000}
       - ALLOW_TEST_ON_AIR=false
       - ENABLE_TV=true
       - ENABLE_TV_YOUTUBE=true
@@ -178,6 +208,15 @@ services:
       - STUCK_MESSAGE_TIMEOUT_MS=60000
       - MAX_DELIVERY_ATTEMPTS=3
       - STUCK_SCAN_INTERVAL_SEC=30
+      # Chroma key do apresentador MuseTalk (renderer/musetalk.py). ENABLED
+      # default "false": composição "caixa nativa" atual, sem mudança de
+      # comportamento. Calibrar COLOR/SIMILARITY/BLEND contra o idle novo
+      # antes de ligar (ver renderer/musetalk.py:compose_presenter_block).
+      - MUSETALK_CHROMA_ENABLED=${MUSETALK_CHROMA_ENABLED:-false}
+      - MUSETALK_CHROMA_COLOR=${MUSETALK_CHROMA_COLOR:-0x00B140}
+      - MUSETALK_CHROMA_SIMILARITY=${MUSETALK_CHROMA_SIMILARITY:-0.14}
+      - MUSETALK_CHROMA_BLEND=${MUSETALK_CHROMA_BLEND:-0.06}
+      - MUSETALK_CHROMA_DESPILL=${MUSETALK_CHROMA_DESPILL:-true}
     depends_on:
       - synthesizer
       - redis

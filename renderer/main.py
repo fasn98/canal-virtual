@@ -31,6 +31,26 @@ ENABLE_LIPSYNC = os.environ.get("ENABLE_LIPSYNC", "false").strip().lower() in (
     "1", "true", "yes", "on",
 )
 
+# --- Provedor do vídeo do apresentador (AVATAR_PROVIDER) -------------------
+# "d-id" (PADRÃO) => fluxo atual INTACTO: synthesizer faz o TTS (ElevenLabs) e
+# o renderer compõe o estúdio (com D-ID opcional quando ENABLE_LIPSYNC=true).
+# "musetalk"      => bifurcação ISOLADA (renderer/musetalk.py): o renderer gera
+# o vídeo do apresentador (voz + rosto num MP4 só) via
+# lib/gpu_client.generate_video() e compõe só logo + lower third + ticker por
+# cima. NÃO usa TTS/D-ID/avatar recortado/chroma/TV b-roll. Fora do loop 24/7
+# por enquanto — ver `python3 -m renderer.test_musetalk`.
+AVATAR_PROVIDER = os.environ.get("AVATAR_PROVIDER", "d-id").strip().lower()
+
+# --- MuseTalk só vai AO AR com opt-in explícito ---------------------------
+# Além de AVATAR_PROVIDER=musetalk é preciso MUSETALK_ALLOW_ON_AIR=true para
+# o provedor musetalk atender itens de PRODUÇÃO. Sem isto: itens de teste
+# (fora do ar) rodam pelo musetalk normalmente, mas a produção segue pelo
+# caminho D-ID/estático. Evita repetir 04/09 — musetalk no ar sem QA de
+# áudio nem fallback. (O fallback D-ID em falha existe de qualquer forma.)
+MUSETALK_ALLOW_ON_AIR = os.environ.get("MUSETALK_ALLOW_ON_AIR", "false").strip().lower() in (
+    "1", "true", "yes", "on",
+)
+
 # --- Chroma key do vídeo de lip-sync (D-ID) ---
 # O mp4 que volta do D-ID tem o fundo verde de assets/avatar_greenscreen.png
 # (mp4 não tem transparência real). Antes do overlay, o renderer remove esse
@@ -437,6 +457,37 @@ def handle_event(event_id, data):
         r.xack(INPUT_STREAM, GROUP, event_id)
         return
 
+    # --- Bifurcação AVATAR_PROVIDER=musetalk ------------------------------
+    # Provedor alternativo, isolado (renderer/musetalk.py). Só atende PRODUÇÃO
+    # com DOIS opt-ins: AVATAR_PROVIDER=musetalk E MUSETALK_ALLOW_ON_AIR=true.
+    # Itens de teste (não vão ao ar) usam o musetalk de qualquer jeito — é o
+    # que o `test_musetalk` exercita. Qualquer falha (pod, QA de áudio
+    # reprovada, ffmpeg) cai no caminho D-ID (ver _render_musetalk_block).
+    if AVATAR_PROVIDER == "musetalk" and (not on_air or MUSETALK_ALLOW_ON_AIR):
+        _render_musetalk_block(
+            event_id, news_id, title, title_original, category, text, data,
+            test_item, on_air, target_final, target_temp,
+        )
+        return
+    if AVATAR_PROVIDER == "musetalk":
+        print(
+            f"{TAG} → AVATAR_PROVIDER=musetalk mas MUSETALK_ALLOW_ON_AIR=false "
+            f"→ item {news_id} vai ao ar pelo caminho D-ID/estático.",
+            flush=True,
+        )
+
+    _render_did_block(
+        event_id, news_id, title, title_original, category, text, data,
+        test_item, on_air, target_final, target_temp,
+    )
+
+
+def _render_did_block(event_id, news_id, title, title_original, category, text,
+                      data, test_item, on_air, target_final, target_temp):
+    """Caminho PADRÃO do renderer: áudio da ElevenLabs (synthesizer) +
+    composição do estúdio aqui (com D-ID opcional se ENABLE_LIPSYNC). É também
+    o FALLBACK do caminho musetalk quando ele falha. Levanta exceção em falha
+    de ffmpeg (sem XACK => a mensagem volta a pendente)."""
     # Usa o áudio real gerado pelo synthesizer (TTS) quando disponível;
     # cai para o áudio fixo apenas se o TTS falhou ou não veio preenchido.
     requested_audio = data.get("audio_file", "").strip()
@@ -652,6 +703,23 @@ def handle_event(event_id, data):
         # Levanta exceção: sem XACK, a mensagem segue pendente para reprocessamento.
         raise RuntimeError(f"ffmpeg falhou (rc={result.returncode}) para notícia {news_id}")
 
+    # Entrega atômica + publicação: idêntica ao caminho musetalk (só a
+    # composição acima difere). Ver _finalize_block.
+    _finalize_block(
+        event_id, news_id, title, title_original, category, text,
+        target_temp, target_final, on_air, test_item,
+    )
+
+
+def _finalize_block(event_id, news_id, title, title_original, category, text,
+                    target_temp, target_final, on_air, test_item):
+    """Entrega atômica + publicação de UM bloco já renderizado em target_temp.
+    Compartilhado pelo caminho D-ID/estático e pelo caminho musetalk: só a
+    COMPOSIÇÃO difere; a ENTREGA (os.replace atômico, proteção de teste fora do
+    ar, marca de emissão, XADD news.block, XACK) é idêntica.
+
+    Levanta RuntimeError se target_temp não existe (sem XACK => a mensagem
+    volta a pendente para reprocessamento)."""
     # Entrega Atômica e Definitiva
     if not os.path.exists(target_temp):
         raise RuntimeError(f"{os.path.basename(target_temp)} não foi gerado para notícia {news_id}")
@@ -702,6 +770,43 @@ def handle_event(event_id, data):
     # Só confirma depois do ffmpeg OK, do final.mp4 gravado em disco
     # (os.replace) e do XADD para news.block.
     r.xack(INPUT_STREAM, GROUP, event_id)
+
+
+def _render_musetalk_block(event_id, news_id, title, title_original, category,
+                           text, data, test_item, on_air, target_final, target_temp):
+    """AVATAR_PROVIDER=musetalk: vídeo do apresentador (voz + rosto) via
+    lib/gpu_client.generate_video() + QA de áudio (renderer/musetalk.py),
+    composto com logo + lower third + ticker.
+
+    FALLBACK: QUALQUER falha aqui (ciclo do pod, QA de áudio reprovada, ffmpeg)
+    cai no caminho D-ID/estático — o canal ao vivo não pode ficar preso
+    repetindo o mesmo bloco enquanto o musetalk ainda está instável. A entrega
+    dos dois caminhos é o mesmo _finalize_block()."""
+    from musetalk import compose_presenter_block  # import tardio: só neste modo
+
+    try:
+        ticker_text = build_ticker_text(title, category)
+        compose_presenter_block(
+            news_id, text, title, category,
+            assets_dir=ASSETS_DIR, ticker_dir=TICKER_DIR,
+            out_path=target_temp, ticker_text=ticker_text,
+        )
+    except Exception as e:
+        print(
+            f"{TAG} → ⚠️ musetalk falhou para {news_id} ({e}). "
+            f"FALLBACK → caminho D-ID/estático.",
+            flush=True,
+        )
+        _render_did_block(
+            event_id, news_id, title, title_original, category, text, data,
+            test_item, on_air, target_final, target_temp,
+        )
+        return
+
+    _finalize_block(
+        event_id, news_id, title, title_original, category, text,
+        target_temp, target_final, on_air, test_item,
+    )
 
 
 def reclaim_stuck():
@@ -822,6 +927,22 @@ def main():
         f"(ENABLE_LIPSYNC={os.environ.get('ENABLE_LIPSYNC', 'false')}).",
         flush=True,
     )
+    print(
+        f"{TAG} → AVATAR_PROVIDER={AVATAR_PROVIDER!r} "
+        f"({'MuseTalk via lib/gpu_client' if AVATAR_PROVIDER == 'musetalk' else 'D-ID/estático (PADRÃO)'}).",
+        flush=True,
+    )
+    if AVATAR_PROVIDER == "musetalk":
+        print(
+            f"{TAG} → MuseTalk on-air: "
+            + (
+                "LIBERADO (MUSETALK_ALLOW_ON_AIR=true)"
+                if MUSETALK_ALLOW_ON_AIR
+                else "BLOQUEADO — produção pelo caminho D-ID; só itens de teste usam musetalk"
+            )
+            + ". Fallback D-ID em falha/QA reprovada sempre ativo.",
+            flush=True,
+        )
     _yt_key = os.environ.get("YOUTUBE_API_KEY", "").strip()
     _yt_on = os.environ.get("ENABLE_TV_YOUTUBE", "true").strip().lower() in (
         "1", "true", "yes", "on",

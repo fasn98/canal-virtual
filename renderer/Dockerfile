@@ -9,13 +9,18 @@ RUN apt-get update && \
 WORKDIR /app
 
 # Copiar requirements
-COPY requirements.txt .
+COPY renderer/requirements.txt .
 
 # Instalar dependências
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copiar código do renderer
-COPY . .
+COPY renderer/ .
+
+# lib/gpu_client.py — usado por musetalk.py quando AVATAR_PROVIDER=musetalk.
+# Contexto de build agora é a raiz do repo (ver docker-compose.yml) só por
+# causa disso; o resto do serviço é idêntico a antes.
+COPY lib/ ./lib/
 
 # Garantir que o script principal é executável
 RUN chmod +x /app/main.py
