@@ -108,6 +108,50 @@ janela.
 - Instrumentar o delta `Processando → SUCESSO EMISSÃO` no renderer (tempo de
   geração D-ID/estático) — hoje só estimado.
 
+## Decisão pendente: TTS Chatterbox (on-pod) vs ElevenLabs
+
+Diagnóstico 2026-09-07: o gargalo do canal é o orçamento ElevenLabs
+(`DAILY_CREDIT_BUDGET=4000` → ~2 blocos fresh/dia), **não** o avatar. Chatterbox
+no pod é grátis por char (validado: 1943 chars / 7 chunks / QA OK). Hoje
+`get_presenter_video` já usa Chatterbox nos blocos MuseTalk — **o mp3 fresh que
+o synthesizer pagou na ElevenLabs para esses blocos é descartado**.
+
+### (a) Sem decisão editorial — fazer assim que der: synthesizer ciente do caminho do bloco
+
+Objetivo: não gastar crédito ElevenLabs em áudio que o MuseTalk vai descartar.
+
+**Exige:**
+1. **Synthesizer ler o modo de avatar.** Passar `AVATAR_PROVIDER`,
+   `MUSETALK_ALLOW_ON_AIR`, `GPU_SERVER_URL`, `INFERENCE_SERVER_API_KEY` ao
+   container `synthesizer` (docker-compose — hoje só o `renderer` recebe).
+2. **Skip da ElevenLabs quando o bloco vai por MuseTalk.** Em `synthesizer/main.py`:
+   se `AVATAR_PROVIDER==musetalk` E `MUSETALK_ALLOW_ON_AIR` E `GET /ready`==200
+   no pod → **não chama a ElevenLabs**; publica `news.ready` com `audio_file`
+   apontando para um **mp3 de reprise já pago** (fallback-only) + marcador
+   `tts=chatterbox`. (~20 linhas + o probe.)
+3. **Fallback de áudio quando o MuseTalk falha.** `_render_musetalk_block` no
+   `except` cai em `_render_did_block`, que usa `data["audio_file"]`. Com o
+   ponteiro de reprise do passo 2, o fallback estático toca um bloco reprisado
+   coerente (mesmo comportamento de hoje quando o orçamento estoura) a $0 — em
+   vez de `DUMMY_AUDIO` (conteúdo errado). Sem o ponteiro, o `except` teria que
+   disparar reprise explicitamente.
+4. **Métrica** `elevenlabs:skipped:musetalk` para medir a economia.
+
+Sem API nova, sem decisão editorial. Risco principal: o caminho de fallback de
+áudio (passo 3) — acertar isso e é seguro. Urgência acoplada a (b): só morde
+quando o MuseTalk de fato funciona numa janela (pod ligado). Construir pronto.
+
+### (b) Decisão editorial pendente (do usuário): janela Chatterbox = "turno do Fabio"
+
+A voz Chatterbox é o clone do Fabio (`audio_fabio_v2.wav`); a voz ElevenLabs
+`ZP7ct…` é a âncora feminina que o caminho estático mostra. **Migrar áudio fresh
+para o Chatterbox = assumir o Fabio como âncora** naquele período. Conecta com a
+"Alternância de âncoras" abaixo: a janela de pod ligado pode ser exatamente o
+**turno do Fabio** (Chatterbox TTS + MuseTalk lip-sync em parte dos blocos),
+com âncora feminina + ElevenLabs no resto do dia. Nesse turno o teto de 4000
+créditos/dia fica irrelevante e o custo marginal cai para ~$0,26/h de pod.
+Não decidido — depende da grade de âncoras.
+
 ## Melhoria de arquitetura pendente
 
 **Alternância de âncoras (feminina / Fabio por período)** exige `MT_AVATAR_ID`
