@@ -225,11 +225,20 @@ services:
       - MUSETALK_CHROMA_SIMILARITY=${MUSETALK_CHROMA_SIMILARITY:-0.14}
       - MUSETALK_CHROMA_BLEND=${MUSETALK_CHROMA_BLEND:-0.06}
       - MUSETALK_CHROMA_DESPILL=${MUSETALK_CHROMA_DESPILL:-true}
-      # Enquadramento do apresentador (renderer/musetalk.py). Escolhido no e2e
-      # 2026-09-06: Y=336 esconde a borda reta atrás do lower third; borda OFF.
-      - MUSETALK_PRESENTER_X=${MUSETALK_PRESENTER_X:-1208}
-      - MUSETALK_PRESENTER_Y=${MUSETALK_PRESENTER_Y:-336}
+      # Enquadramento do apresentador (renderer/musetalk.py). Reajustado
+      # 2026-09-06 c/ a bancada: SCALE=0.70 + Y=330 sobem o recorte
+      # (cabeça+ombros) até a bancada cobrir a borda reta; X=1080 alinha com o
+      # apresentador D-ID. BORDER OFF.
+      - MUSETALK_PRESENTER_X=${MUSETALK_PRESENTER_X:-1080}
+      - MUSETALK_PRESENTER_Y=${MUSETALK_PRESENTER_Y:-330}
+      - MUSETALK_PRESENTER_SCALE=${MUSETALK_PRESENTER_SCALE:-0.70}
       - MUSETALK_PRESENTER_BORDER=${MUSETALK_PRESENTER_BORDER:-false}
+      # Bancada curva em 1º plano (assets/studio_desk.png). Aplicada nos DOIS
+      # caminhos (D-ID: _render_did_block; MuseTalk: compose_presenter_block).
+      # Esconde a borda reta do recorte e ancora a figura em studio_bg_novo.png.
+      - STUDIO_DESK_ENABLED=${STUDIO_DESK_ENABLED:-false}
+      - STUDIO_DESK_IMG=${STUDIO_DESK_IMG:-studio_desk.png}
+      - STUDIO_DESK_Y=${STUDIO_DESK_Y:-0}
     depends_on:
       - synthesizer
       - redis

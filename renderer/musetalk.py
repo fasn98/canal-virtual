@@ -115,9 +115,33 @@ REJECTED_DIRNAME = "_rejected"
 BACKGROUND_NAME = os.environ.get("MUSETALK_BG_NAME", "studio_bg_novo.png")
 PRESENTER_X = int(os.environ.get("MUSETALK_PRESENTER_X", "1208"))
 PRESENTER_Y = int(os.environ.get("MUSETALK_PRESENTER_Y", "336"))
+# Escala do recorte antes do overlay. 1.0 = nativo (~572px, close de rosto —
+# ~1,4x mais largo que o apresentador D-ID). < 1.0 encolhe pra aproximar da
+# proporção do D-ID e parecer sentado (ajustar Y junto).
+try:
+    PRESENTER_SCALE = float(os.environ.get("MUSETALK_PRESENTER_SCALE", "1.0"))
+except ValueError:
+    PRESENTER_SCALE = 1.0
 PRESENTER_BORDER = os.environ.get("MUSETALK_PRESENTER_BORDER", "false").strip().lower() in (
     "1", "true", "yes", "on",
 )
+
+# --- Bancada/console em primeiro plano (studio_bg_novo.png não tem mesa) ----
+# PNG RGBA de canvas inteiro (1920x1080, ver assets/make_studio_desk.py),
+# compositado ENTRE o apresentador e o logo — ancora visualmente a figura e
+# esconde a borda inferior do recorte, como a bancada da cena antiga. Mesmo
+# asset/vars valem pro caminho D-ID (renderer/main.py). Desligado por padrão.
+#   STUDIO_DESK_ENABLED   liga/desliga (default false)
+#   STUDIO_DESK_IMG       nome do arquivo em assets/ (default studio_desk.png)
+#   STUDIO_DESK_Y         deslocamento vertical do overlay (default 0)
+DESK_ENABLED = os.environ.get("STUDIO_DESK_ENABLED", "false").strip().lower() in (
+    "1", "true", "yes", "on",
+)
+DESK_NAME = os.environ.get("STUDIO_DESK_IMG", "studio_desk.png").strip()
+try:
+    DESK_Y = int(os.environ.get("STUDIO_DESK_Y", "0"))
+except ValueError:
+    DESK_Y = 0
 
 # --- Chroma key do vídeo do apresentador (MuseTalk) -------------------------
 # O idle novo (LivePortrait) tem fundo verde-chroma limpo e estável. Mesma
@@ -464,6 +488,14 @@ def compose_presenter_block(news_id, text, title, category, *, assets_dir,
             raise RuntimeError(f"asset não encontrado: {p}")
 
     pv_w, pv_h = _probe_dims(presenter_mp4)
+    # Escala do recorte (MUSETALK_PRESENTER_SCALE): 1.0 = nativo. Dimensões
+    # pares (libx264). pv_w/pv_h passam a ser as JÁ escaladas (usadas no
+    # contorno opcional). Sem scale se == 1.0 (byte-idêntico ao de antes).
+    _sc_filter = ""
+    if abs(PRESENTER_SCALE - 1.0) > 1e-3 and pv_w and pv_h:
+        pv_w = max(2, (int(pv_w * PRESENTER_SCALE) // 2) * 2)
+        pv_h = max(2, (int(pv_h * PRESENTER_SCALE) // 2) * 2)
+        _sc_filter = f",scale={pv_w}:{pv_h}"  # prefixado com ',' pra encaixar após setsar=1
 
     tmp_dir = os.path.dirname(os.path.abspath(out_path)) or "."
     title_txt = os.path.join(tmp_dir, f".musetalk_title_{news_id}.txt")
@@ -488,7 +520,7 @@ def compose_presenter_block(news_id, text, title, category, *, assets_dir,
     if MUSETALK_CHROMA_ENABLED:
         despill = ",despill=type=green:mix=0.5:expand=0" if MUSETALK_CHROMA_DESPILL else ""
         presenter_filter = (
-            f"[0:v]setsar=1,"
+            f"[0:v]setsar=1{_sc_filter},"
             f"chromakey={MUSETALK_CHROMA_COLOR}:{MUSETALK_CHROMA_SIMILARITY}:{MUSETALK_CHROMA_BLEND}"
             f"{despill}[pv];"
         )
@@ -499,7 +531,7 @@ def compose_presenter_block(news_id, text, title, category, *, assets_dir,
             flush=True,
         )
     else:
-        presenter_filter = "[0:v]setsar=1[pv];"
+        presenter_filter = f"[0:v]setsar=1{_sc_filter}[pv];"
 
     fc = (
         "[1:v]scale=1920:1080:force_original_aspect_ratio=increase,"
@@ -517,6 +549,13 @@ def compose_presenter_block(news_id, text, title, category, *, assets_dir,
             f"w={pv_w + 4}:h={pv_h + 4}:color=white@0.5:t=2[b0b];"
         )
         last = "b0b"
+    # Bancada em primeiro plano (entre apresentador e logo). Input 5.
+    desk_img = os.path.join(assets_dir, DESK_NAME)
+    use_desk = DESK_ENABLED and os.path.exists(desk_img)
+    if use_desk:
+        fc += f"[5:v]setsar=1[dk];[{last}][dk]overlay=0:{DESK_Y}[b0d];"
+        last = "b0d"
+
     fc += (
         f"[2:v]scale={logo_scale}[lg];[{last}][lg]overlay={logo_xy}[b1];"
         "[3:v]scale=1920:200[lt];[b1][lt]overlay=0:800[b2];"
@@ -543,6 +582,7 @@ def compose_presenter_block(news_id, text, title, category, *, assets_dir,
         "-loop", "1", "-i", logo_img,
         "-loop", "1", "-i", lowerthird_img,
         "-loop", "1", "-i", ticker_img,
+        *(["-loop", "1", "-i", desk_img] if use_desk else []),
         "-filter_complex", fc,
         "-map", "[vout]", "-map", "0:a",
         "-r", "30",

@@ -89,6 +89,21 @@ LOWERTHIRD_IMG = f"{ASSETS_DIR}/lowerthird.png"
 DUMMY_AUDIO = f"{ASSETS_DIR}/news_audio.wav"
 TICKER_IMG = f"{TICKER_DIR}/ticker.png"
 
+# --- Bancada/console em primeiro plano ---
+# studio_bg_novo.png não tem mesa (a cena antiga studio_bg.jpg tinha). Este PNG
+# RGBA de canvas inteiro (assets/studio_desk.png, ver assets/make_studio_desk.py)
+# é compositado ENTRE a apresentadora e o logo — ancora a figura e esconde a
+# borda inferior do recorte. Mesmas vars valem pro caminho MuseTalk
+# (renderer/musetalk.py). Desligado por padrão.
+STUDIO_DESK_ENABLED = os.environ.get("STUDIO_DESK_ENABLED", "false").strip().lower() in (
+    "1", "true", "yes", "on",
+)
+DESK_IMG = f"{ASSETS_DIR}/{os.environ.get('STUDIO_DESK_IMG', 'studio_desk.png').strip()}"
+try:
+    STUDIO_DESK_Y = int(os.environ.get("STUDIO_DESK_Y", "0"))
+except ValueError:
+    STUDIO_DESK_Y = 0
+
 # --- TV virtual (b-roll temático no cenário) ---
 # Moldura com a "tela" recortada (transparente). Dentro dela roda, em loop, um
 # vídeo genérico do Pexels relacionado à CATEGORIA da notícia principal do
@@ -617,16 +632,29 @@ def _render_did_block(event_id, news_id, title, title_original, category, text,
         ]
         bg_label = "bgtv2"
 
+    # Bancada em primeiro plano (entre apresentadora e logo). Índice do input
+    # depende da TV (6=vídeo, 7=moldura quando há b-roll).
+    use_desk = STUDIO_DESK_ENABLED and os.path.exists(DESK_IMG)
+    desk_idx = 8 if tv_video else 6
+    after_av = "bg1"
+
     filter_parts += [
         # Recorte da apresentadora (transparente na imagem estática; verde removido
         # por chroma key no vídeo do D-ID). Sem retângulo opaco ela vem maior e
         # mais à frente, sentada na poltrona central-direita da cena nova.
         avatar_filter,
         # base (mãos/braços, onde o recorte tem a borda reta) fica escondida
-        # atrás do lower third (y>=800).
+        # atrás do lower third (y>=800) — e da bancada, se ligada.
         f"[{bg_label}][av]overlay=940:305[bg1];",
+    ]
+    if use_desk:
+        filter_parts.append(
+            f"[{desk_idx}:v]setsar=1[dk];[bg1][dk]overlay=0:{STUDIO_DESK_Y}[bg1d];"
+        )
+        after_av = "bg1d"
+    filter_parts += [
         f"[2:v]scale={logo_scale}[lg];",
-        f"[bg1][lg]overlay={logo_xy}[bg2];",
+        f"[{after_av}][lg]overlay={logo_xy}[bg2];",
         "[3:v]scale=1920:200[lt];",
         "[bg2][lt]overlay=0:800[bg3];",
         f"[bg3]drawtext=textfile='{title_txt_file}':fontcolor={lt_fontcolor}:fontsize={lt_fontsize}:x={lt_x}:y={lt_y}[bg4];",
@@ -680,6 +708,7 @@ def _render_did_block(event_id, news_id, title, title_original, category, text,
         "-loop", "1", "-i", TICKER_IMG,
         "-i", AUDIO_FILE,
         *tv_inputs,
+        *(["-loop", "1", "-i", DESK_IMG] if use_desk else []),
         "-filter_complex", filter_complex,
         "-map", "[vout]",
         "-map", "5:a",
