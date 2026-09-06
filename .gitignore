@@ -25,3 +25,8 @@ __pycache__/
 # Arquivos temporários / previews
 canal-virtual.zip
 preview_*.png
+
+# Previews de calibração (dezenas de MB/rodada) + backups locais timestamped
+previews/
+*.bak.*
+.env.bak*

@@ -25,7 +25,7 @@ RIM_RISE = int(sys.argv[2]) if len(sys.argv) > 2 else 46
 GLASS_TOP = (54, 118, 176)    # topo do tampo de vidro (logo abaixo do rim)
 FASCIA_TOP = (30, 74, 124)    # topo da saia frontal
 FASCIA_BOT = (6, 14, 30)      # base da saia frontal
-PANEL_A = 245                 # opacidade base do painel
+PANEL_A = 255                 # opacidade base do painel
 RIM = (198, 240, 255)         # núcleo da linha de luz do rim
 GLOW = (70, 180, 246)         # halo do rim
 ACCENT = (90, 190, 240)       # 2a linha fina de accent
@@ -54,14 +54,14 @@ for x in range(W):
         elif d < 6:
             px[x, y] = (*RIM, 255)                       # núcleo da luz
         elif d < 12:
-            px[x, y] = (*RIM, 150)                       # brilho fino
+            px[x, y] = (*RIM, 255)                       # brilho fino
         elif d < GLASS_BAND:
             # tampo de vidro translúcido pegando luz
             f = (d - 12) / (GLASS_BAND - 12)
             r = int(GLASS_TOP[0] + (FASCIA_TOP[0] - GLASS_TOP[0]) * f)
             g = int(GLASS_TOP[1] + (FASCIA_TOP[1] - GLASS_TOP[1]) * f)
             b = int(GLASS_TOP[2] + (FASCIA_TOP[2] - GLASS_TOP[2]) * f)
-            px[x, y] = (r, g, b, int(200 - 40 * f))
+            px[x, y] = (r, g, b, 255)
         else:
             # saia frontal — gradiente vertical
             f = min(1.0, (y - ry - GLASS_BAND) / (H - ry - GLASS_BAND))
