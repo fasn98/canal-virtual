@@ -126,6 +126,63 @@ def is_test_id(news_id, title=""):
     )
 
 
+# --- Ciência do caminho do bloco: skip da ElevenLabs quando o MuseTalk atende
+# Quando o renderer VAI mandar o item pelo MuseTalk (Chatterbox on-pod), o mp3
+# fresh que a ElevenLabs cobraria seria descartado. Este gate espelha o
+# roteamento do renderer (main.py:handle_event):
+#     usa MuseTalk quando  AVATAR_PROVIDER==musetalk  E
+#         (not on_air  or  MUSETALK_ALLOW_ON_AIR)
+#     e   not on_air  ==  is_test_id(...)  and NOT ALLOW_TEST_ON_AIR
+# As duas flags de roteamento vêm de âncora YAML compartilhada com o renderer
+# (docker-compose.yml) — têm que valer o mesmo nos dois serviços. Ver ROADMAP
+# "(c)".
+AVATAR_PROVIDER = os.environ.get("AVATAR_PROVIDER", "d-id").strip().lower()
+MUSETALK_ALLOW_ON_AIR = os.environ.get("MUSETALK_ALLOW_ON_AIR", "false").strip().lower() in (
+    "1", "true", "yes", "on",
+)
+ALLOW_TEST_ON_AIR = os.environ.get("ALLOW_TEST_ON_AIR", "false").strip().lower() in (
+    "1", "true", "yes", "on",
+)
+GPU_SERVER_URL = os.environ.get("GPU_SERVER_URL", "").strip().rstrip("/")
+
+_pod_ready_cache = {"ts": 0.0, "ok": False}
+_POD_READY_TTL_SEC = 20
+
+
+def _pod_ready():
+    """GET {GPU_SERVER_URL}/ready — 200 só quando os DOIS workers (tts+lipsync)
+    do pod estão de pé (mesmo contrato de lib/gpu_client._wait_inference_ready).
+    NÃO liga o pod: é só uma sonda. Resultado cacheado ~20 s para não bater no
+    proxy a cada mensagem. Qualquer falha => False (=> NÃO pula a ElevenLabs)."""
+    if not GPU_SERVER_URL:
+        return False
+    now = time.monotonic()
+    if now - _pod_ready_cache["ts"] < _POD_READY_TTL_SEC:
+        return _pod_ready_cache["ok"]
+    ok = False
+    try:
+        ok = requests.get(f"{GPU_SERVER_URL}/ready", timeout=6).status_code == 200
+    except requests.exceptions.RequestException:
+        ok = False
+    _pod_ready_cache.update(ts=now, ok=ok)
+    return ok
+
+
+def musetalk_will_handle(news_id, title):
+    """True quando o renderer vai mandar este item pelo MuseTalk — nesse caso
+    não gastamos ElevenLabs. `_pod_ready()` é um AND a mais (não espelhado): o
+    synthesizer tem que ser conservador — se pular a ElevenLabs e o MuseTalk
+    não rodar, o fallback fica sem áudio fresco; o renderer pode ser
+    incondicional porque tem o fallback D-ID."""
+    if AVATAR_PROVIDER != "musetalk":
+        return False
+    testish = is_test_id(news_id, title)
+    routes_to_musetalk = (testish and not ALLOW_TEST_ON_AIR) or MUSETALK_ALLOW_ON_AIR
+    if not routes_to_musetalk:
+        return False
+    return _pod_ready()
+
+
 # --- Índice de notícias "completas" de hoje (para reprises sem custo) --------
 # Toda notícia que JÁ tem áudio real pago (gerado agora OU cache HIT) entra num
 # Hash Redis por data: field = id, value = JSON com o que o renderer precisa
@@ -339,6 +396,38 @@ def handle_event(event_id, data):
     commentary = safe(data.get("commentary"))
     category = safe(data.get("category"))
     is_promo = category.strip().lower() in ("promoção", "promocao", "promo")
+
+    # --- Skip da ElevenLabs quando o bloco vai pelo MuseTalk (Chatterbox
+    # on-pod): o mp3 fresh seria descartado. Publica news.ready com um áudio de
+    # REPRISE já pago (fallback-only — o renderer MuseTalk ignora `audio_file`;
+    # só o fallback D-ID dentro de _render_musetalk_block usaria, e ainda prefere
+    # o WAV do Chatterbox aprovado no QA) + marcador `tts_engine=chatterbox`.
+    # Promo nunca entra aqui (id fixo, cai no cache do próprio synthesize_audio).
+    # Ver ROADMAP "(c)".
+    if not is_promo and musetalk_will_handle(news_id, safe(data.get("title"))):
+        fb = pick_reprise_item() or {}
+        out = {
+            "id": news_id,
+            "title": safe(data.get("title")),
+            "title_original": safe(data.get("title_original")),
+            "category": category,
+            "commentary": commentary,
+            "source": safe(data.get("source")),
+            "audio_file": safe(fb.get("audio_file")),  # "" se ainda não há item pago hoje
+            "budget_exceeded": "false",
+            "tts_engine": "chatterbox",
+            "timestamp": time.time(),
+        }
+        r.xadd(OUTPUT_STREAM, out)
+        r.xack(INPUT_STREAM, GROUP, event_id)
+        bump_metric("elevenlabs:skipped:musetalk")
+        print(
+            f"{TAG} → SKIP ElevenLabs ({news_id}): bloco vai pelo MuseTalk/Chatterbox. "
+            f"news.ready:",
+            json.dumps(out, ensure_ascii=False),
+            flush=True,
+        )
+        return
 
     # Gera o áudio (grava em disco antes de retornar o caminho). budget_exceeded
     # = True quando o freio de gasto diário barrou a chamada; nesse caso o

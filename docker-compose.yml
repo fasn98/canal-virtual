@@ -1,3 +1,13 @@
+# ── Roteamento MuseTalk × D-ID: MANTER SINCRONIZADOS ──────────────────────────
+# O gate de skip da ElevenLabs no `synthesizer` (_musetalk_will_handle) espelha
+# o roteamento do `renderer` (main.py:handle_event):
+#     usa MuseTalk quando  (not on_air or MUSETALK_ALLOW_ON_AIR)
+#     e   not on_air  ==  is_test_item(...) and not ALLOW_TEST_ON_AIR
+# As duas vars abaixo TÊM que valer o mesmo nos dois serviços — por isso âncora
+# YAML única. Não redeclarar o literal em cada bloco `environment`.
+x-allow-test-on-air: &allow-test-on-air "ALLOW_TEST_ON_AIR=false"
+x-musetalk-allow-on-air: &musetalk-allow-on-air "MUSETALK_ALLOW_ON_AIR=${MUSETALK_ALLOW_ON_AIR:-false}"
+
 services:
   redis:
     image: redis:7
@@ -150,6 +160,15 @@ services:
       - ELEVENLABS_VOICE_ID=${ELEVENLABS_VOICE_ID}
       - ELEVENLABS_MODEL_ID=${ELEVENLABS_MODEL_ID}
       - DAILY_CREDIT_BUDGET=${DAILY_CREDIT_BUDGET}
+      # Ciência do caminho do bloco: não gastar crédito ElevenLabs em áudio que
+      # o MuseTalk (Chatterbox on-pod) vai descartar. Ver synthesizer/main.py:
+      # _musetalk_will_handle + ROADMAP "(c)". As 2 flags de roteamento vêm de
+      # âncora compartilhada com o renderer (topo do arquivo) — manter sync.
+      - AVATAR_PROVIDER=${AVATAR_PROVIDER:-d-id}
+      - *musetalk-allow-on-air
+      - *allow-test-on-air
+      - GPU_SERVER_URL=${GPU_SERVER_URL:-}
+      - INFERENCE_SERVER_API_KEY=${INFERENCE_SERVER_API_KEY:-}
       - STUCK_MESSAGE_TIMEOUT_MS=60000
       - MAX_DELIVERY_ATTEMPTS=3
       - STUCK_SCAN_INTERVAL_SEC=30
@@ -192,7 +211,8 @@ services:
       # AVATAR_PROVIDER=musetalk). Sem ele, itens de teste rodam pelo musetalk
       # mas a produção segue pelo caminho D-ID. Falha/QA reprovada no musetalk
       # SEMPRE cai no D-ID (ver renderer/main.py:_render_musetalk_block).
-      - MUSETALK_ALLOW_ON_AIR=${MUSETALK_ALLOW_ON_AIR:-false}
+      # Âncora compartilhada com o `synthesizer` (topo do arquivo) — manter sync.
+      - *musetalk-allow-on-air
       # QA do áudio que volta do pod (vazio => padrão do código; ver .env.example).
       - MUSETALK_QA_ENABLED=${MUSETALK_QA_ENABLED:-true}
       - MUSETALK_QA_CHARS_PER_SEC=${MUSETALK_QA_CHARS_PER_SEC:-}
@@ -206,7 +226,8 @@ services:
       # Log persistente do ciclo do pod GPU em /app/output/gpu_client.log
       # (volume ./volumes/output). Vazio nesta var desliga.
       - GPU_CLIENT_LOG_MAX_BYTES=${GPU_CLIENT_LOG_MAX_BYTES:-5000000}
-      - ALLOW_TEST_ON_AIR=false
+      # Âncora compartilhada com o `synthesizer` (topo do arquivo) — manter sync.
+      - *allow-test-on-air
       - ENABLE_TV=true
       - ENABLE_TV_YOUTUBE=true
       - YOUTUBE_API_KEY=${YOUTUBE_API_KEY}

@@ -811,7 +811,7 @@ def _render_musetalk_block(event_id, news_id, title, title_original, category,
     cai no caminho D-ID/estático — o canal ao vivo não pode ficar preso
     repetindo o mesmo bloco enquanto o musetalk ainda está instável. A entrega
     dos dois caminhos é o mesmo _finalize_block()."""
-    from musetalk import compose_presenter_block  # import tardio: só neste modo
+    from musetalk import PresenterFallbackError, compose_presenter_block  # import tardio
 
     try:
         ticker_text = build_ticker_text(title, category)
@@ -820,6 +820,29 @@ def _render_musetalk_block(event_id, news_id, title, title_original, category,
             assets_dir=ASSETS_DIR, ticker_dir=TICKER_DIR,
             out_path=target_temp, ticker_text=ticker_text,
         )
+    except PresenterFallbackError as e:
+        # MuseTalk reprovou o VÍDEO no QA, mas o áudio do Chatterbox passou.
+        # MODO 1: com o WAV preservado -> caminho estático COM esse áudio
+        # (conteúdo certo da notícia), não reprise/dummy.
+        if e.audio_path and os.path.exists(e.audio_path):
+            print(
+                f"{TAG} → ⚠️ musetalk reprovou o vídeo de {news_id}; áudio "
+                f"Chatterbox OK → estático com {e.audio_path}.",
+                flush=True,
+            )
+            _render_did_block(
+                event_id, news_id, title, title_original, category, text,
+                {**data, "audio_file": e.audio_path},
+                test_item, on_air, target_final, target_temp,
+            )
+            return
+        # MODO 2: sem áudio utilizável -> NÃO emite bloco novo (sem XACK, a
+        # mensagem volta a pendente). O streamer segue no último final.mp4 bom
+        # (política atual: não usa DUMMY_AUDIO com manchete nova).
+        raise RuntimeError(
+            f"musetalk falhou para {news_id} e não há áudio Chatterbox "
+            f"preservado; segurando o bloco."
+        ) from e
     except Exception as e:
         print(
             f"{TAG} → ⚠️ musetalk falhou para {news_id} ({e}). "

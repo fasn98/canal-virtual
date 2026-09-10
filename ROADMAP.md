@@ -141,6 +141,74 @@ Sem API nova, sem decisão editorial. Risco principal: o caminho de fallback de
 áudio (passo 3) — acertar isso e é seguro. Urgência acoplada a (b): só morde
 quando o MuseTalk de fato funciona numa janela (pod ligado). Construir pronto.
 
+### (c) Correções ao diff do Passo 3 (documentadas 2026-09-10, NÃO implementadas)
+
+**Pronúncia pt-BR do Chatterbox NÃO é bloqueador.** Investigação 2026-09-10:
+falso alarme. O worker (`chatterbox_worker.py`) já chama
+`model.generate(text, language_id=LANG)` com `LANG = os.environ.get("TTS_LANG",
+"pt")` (linha 33/113), impl `multilingual`. Texto real acentuado da pipeline
+(1704–1784 chars, chunkado, 6–7 blocos, pod RTX 4090) → áudio com ç/acento/nasal
+correto, validado de ouvido. O "bug" veio do fixture `p2_text.txt` que eu montei
+em ASCII puro ("edicao/nao/atencao") no Passo 2 — não da pipeline. Nada a
+corrigir no TTS.
+
+**Correção 1 — o gate do synthesizer tem que espelhar o do renderer.**
+Roteamento do renderer (`renderer/main.py:481`):
+`AVATAR_PROVIDER=="musetalk" and (not on_air or MUSETALK_ALLOW_ON_AIR)`, onde
+`not on_air == is_test_item(...) and not ALLOW_TEST_ON_AIR`. O rascunho original
+do gate do synthesizer barrava o skip em item de teste a menos que
+`ELEVENLABS_SKIP_ALLOW_TEST=true` — **não espelha**: com `MUSETALK_ALLOW_ON_AIR=
+false` (estado normal) o renderer manda item de teste pro MuseTalk, mas o
+synthesizer chamaria a ElevenLabs → o mp3 é descartado. Gate correto:
+
+```
+def _musetalk_will_handle(news_id, title):
+    if AVATAR_PROVIDER != "musetalk":
+        return False
+    testish = is_test_id(news_id, title)
+    # espelha renderer/main.py:481 → (not on_air or MUSETALK_ALLOW_ON_AIR)
+    routes = (testish and not ALLOW_TEST_ON_AIR) or MUSETALK_ALLOW_ON_AIR
+    if not routes:
+        return False
+    return _pod_ready()   # AND extra: só pula ElevenLabs se o pod puder atender
+```
+
+Exige passar `ALLOW_TEST_ON_AIR` ao container `synthesizer` (hoje só o renderer
+recebe). A assimetria do `_pod_ready()` é proposital: o renderer roteia item de
+teste pro MuseTalk incondicionalmente (tem fallback D-ID se o pod cair); o
+synthesizer tem que ser conservador — só pula a ElevenLabs se estiver confiante
+que o MuseTalk produz áudio, senão o fallback fica sem áudio fresco.
+
+**Correção 2 — `ELEVENLABS_SKIP_ALLOW_TEST` deixa de ser necessário.** Com a
+correção 1, item de teste + pod pronto → o gate já retorna True → skip
+automático (era exatamente o que a flag fazia manualmente). Item de teste + pod
+fora → gate False → ElevenLabs normal → fallback D-ID com o mp3 fresco. A
+validação "sem ir ao ar" que a flag habilitava já acontece sozinha: pod ligado +
+injeta item de teste → skip ocorre, e item de teste nunca toca `final.mp4` de
+produção (vai pra `final_test.mp4`). **Remover do diff**: a env no
+docker-compose, a leitura no synthesizer e o ramo do gate que a referenciava. Se
+algum dia quiser *forçar* ElevenLabs num item de teste (ex.: exercitar o
+fallback D-ID com áudio certo), isso é `AVATAR_PROVIDER=d-id` temporário ou uma
+flag `ELEVENLABS_FORCE` dedicada — não uma "skip-allow". Não adicionar
+especulativamente.
+
+**Diff do Passo 3 revisado (net):**
+- `docker-compose.yml` (env do `synthesizer`): + `AVATAR_PROVIDER`,
+  `MUSETALK_ALLOW_ON_AIR`, `ALLOW_TEST_ON_AIR`, `GPU_SERVER_URL`,
+  `INFERENCE_SERVER_API_KEY`. (sai `ELEVENLABS_SKIP_ALLOW_TEST`)
+- `synthesizer/main.py`: `_pod_ready()` (probe `/ready`, cache ~20s) +
+  `_musetalk_will_handle()` (gate espelhado, sem ramo de flag) + bloco de skip
+  em `handle_event` antes de `synthesize_audio` (publica `news.ready` com
+  ponteiro de reprise já pago + `tts_engine=chatterbox`, `bump_metric(
+  "elevenlabs:skipped:musetalk")`, xack, return). ~50 linhas.
+- `renderer/musetalk.py`: `PresenterFallbackError` + preservar o WAV aprovado no
+  QA (não apagar em `finally` antes do QA do MP4). Inalterado do rascunho.
+- `renderer/main.py`: `_render_musetalk_block` `except` em 2 modos (WAV
+  Chatterbox aprovado → estático com esse áudio; sem WAV → segura o bloco).
+  Inalterado do rascunho.
+
+Nada implementado. Aguarda OK.
+
 ### (b) Decisão editorial pendente (do usuário): janela Chatterbox = "turno do Fabio"
 
 A voz Chatterbox é o clone do Fabio (`audio_fabio_v2.wav`); a voz ElevenLabs
@@ -158,3 +226,15 @@ Não decidido — depende da grade de âncoras.
 **por requisição** (parâmetro no `/lipsync` ou `/generate`), não fixo no boot do
 worker. Hoje trocar de âncora = editar `start_all.sh` + `stop_all/start_all` +
 prep de 2–4 min. Bloqueia qualquer grade com mais de um apresentador.
+
+## Dívida técnica
+
+**Sem heartbeat para seca de notícia** (diagnosticado 2026-09-10) — a pipeline
+trava no último bloco indefinidamente quando o feed para de produzir, mesmo com
+orçamento disponível. O reprise só cobre **orçamento estourado**
+(`budget_exceeded=True` dispara `pick_reprise_item()` dentro de `handle_event`,
+que só roda quando chega um item em `news.final`); quando a própria notícia seca,
+`handle_event` nem roda. Visto na madrugada de 2026-09-10: último `news.final`
+00:52 UTC, `collector` em "0 novos" por >1 h, `final.mp4` parado, índice de
+reprise saudável (1 item hoje) mas nunca consultado. Precisa de: **timeout desde
+o último `news.final` → forçar reprise mesmo sem `budget_exceeded`**.

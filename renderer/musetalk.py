@@ -58,6 +58,19 @@ except ImportError:  # execução fora da raiz do repo
 
 MUSETALK_DIR = os.environ.get("MUSETALK_DIR", "/app/assets/musetalk")
 
+
+class PresenterFallbackError(RuntimeError):
+    """MuseTalk falhou DEPOIS de já ter um WAV do Chatterbox APROVADO no QA de
+    áudio (`_qa_wav`) — típico: o vídeo/mux reprovou no QA final, mas o áudio
+    está bom. Carrega o caminho desse WAV (`audio_path`) para o renderer emitir
+    o bloco pelo caminho estático com o áudio CERTO (conteúdo da notícia), em
+    vez de reprise/dummy. `audio_path` pode ser None se não deu para preservar o
+    WAV — aí o renderer segura o bloco."""
+
+    def __init__(self, msg, audio_path=None):
+        super().__init__(msg)
+        self.audio_path = audio_path
+
 # --- QA do áudio pós-geração (gate anti-"voz ininteligível") ---------------
 # O pod devolve TTS + rosto num MP4 só; quando o TTS degenera (embola,
 # trunca, fica mudo) o arquivo tem o tamanho "certo" e passava direto pro ar
@@ -270,47 +283,66 @@ def get_presenter_video(news_id, text, *, out_dir=None):
                 f"TTS de {news_id} reprovada no QA de áudio — {e}"
             ) from e
 
+    # _keep_wav: quando o QA final do MP4 reprova mas o WAV do Chatterbox já
+    # passou pelo _qa_wav, movemos o WAV para .{id}.fallback.wav e NÃO o
+    # apagamos no finally — o renderer usa esse áudio no caminho estático.
+    _keep_wav = False
     try:
-        with gpu_session() as pod_url:
-            # Pipeline chunked: texto -> blocos de frase (<= MUSETALK_TTS_MAX_CHARS)
-            # -> /tts por bloco -> WAV concatenado (wav_tmp) -> _qa_wav -> /lipsync
-            # por bloco -> MP4 concatenado (out_path). Fatiar o lip-sync também é
-            # obrigatório: o proxy do RunPod corta /lipsync em ~100 s, e um
-            # comentário inteiro (~110 s de áudio) dá HTTP 524 numa chamada só.
-            generate_presenter_chunked(
-                str(text), out_path=out_path, wav_out=wav_tmp,
-                on_wav=_qa_wav, server_url=pod_url,
-            )
-            have_video = os.path.isfile(out_path) and os.path.getsize(out_path) > 0
-    except GpuError as e:
-        if have_video:
-            # Vídeo pronto; só o desligamento do pod falhou. Não jogamos fora,
-            # mas gritamos alto — o pod pode ter ficado ligado cobrando.
-            print(
-                f"{TAG} → ⚠️ ATENÇÃO: vídeo gerado OK mas o ciclo do pod falhou "
-                f"({e}) — CONFIRA NO RUNPOD SE O POD FICOU LIGADO.",
-                flush=True,
-            )
-        else:
-            raise RuntimeError(f"ciclo do pod GPU falhou para {news_id}: {e}") from e
-    finally:
         try:
-            os.remove(wav_tmp)
-        except OSError:
-            pass
+            with gpu_session() as pod_url:
+                # Pipeline chunked: texto -> blocos de frase (<= MUSETALK_TTS_MAX_CHARS)
+                # -> /tts por bloco -> WAV concatenado (wav_tmp) -> _qa_wav ->
+                # /lipsync por bloco -> MP4 concatenado (out_path). Fatiar o
+                # lip-sync também é obrigatório: o proxy do RunPod corta /lipsync
+                # em ~100 s, e um comentário inteiro (~110 s de áudio) dá HTTP
+                # 524 numa chamada só.
+                generate_presenter_chunked(
+                    str(text), out_path=out_path, wav_out=wav_tmp,
+                    on_wav=_qa_wav, server_url=pod_url,
+                )
+                have_video = os.path.isfile(out_path) and os.path.getsize(out_path) > 0
+        except GpuError as e:
+            if have_video:
+                # Vídeo pronto; só o desligamento do pod falhou. Não jogamos
+                # fora, mas gritamos alto — o pod pode ter ficado ligado cobrando.
+                print(
+                    f"{TAG} → ⚠️ ATENÇÃO: vídeo gerado OK mas o ciclo do pod falhou "
+                    f"({e}) — CONFIRA NO RUNPOD SE O POD FICOU LIGADO.",
+                    flush=True,
+                )
+            else:
+                raise RuntimeError(f"ciclo do pod GPU falhou para {news_id}: {e}") from e
 
-    if not os.path.isfile(out_path) or os.path.getsize(out_path) == 0:
-        raise RuntimeError(f"pipeline não produziu MP4 válido para {news_id}: {out_path}")
+        if not os.path.isfile(out_path) or os.path.getsize(out_path) == 0:
+            raise RuntimeError(f"pipeline não produziu MP4 válido para {news_id}: {out_path}")
 
-    # QA final no MP4 concatenado (redundante com o QA do WAV, mas pega
-    # mux/lip-sync torto — defasagem A/V, junção de blocos ruim, etc.).
-    try:
-        _validate_presenter_media(out_path, text)
-    except RuntimeError as e:
-        _reject_media(out_path, out_dir, news_id, str(e))
-        raise RuntimeError(
-            f"vídeo do apresentador para {news_id} reprovado no QA — {e}"
-        ) from e
+        # QA final no MP4 concatenado (redundante com o QA do WAV, mas pega
+        # mux/lip-sync torto — defasagem A/V, junção de blocos ruim, etc.).
+        try:
+            _validate_presenter_media(out_path, text)
+        except RuntimeError as e:
+            _reject_media(out_path, out_dir, news_id, str(e))
+            # O áudio já passou pelo _qa_wav (é bom); só o vídeo reprovou.
+            # Preserva o WAV e propaga PresenterFallbackError — o renderer emite
+            # o bloco pelo estático com o áudio CERTO em vez de reprise/dummy.
+            kept = None
+            if os.path.isfile(wav_tmp) and os.path.getsize(wav_tmp) > 0:
+                kept = os.path.join(out_dir, f".{news_id}.fallback.wav")
+                try:
+                    os.replace(wav_tmp, kept)
+                    _keep_wav = True
+                except OSError:
+                    kept = None
+            raise PresenterFallbackError(
+                f"vídeo do apresentador para {news_id} reprovado no QA — {e}",
+                audio_path=kept,
+            ) from e
+    finally:
+        if not _keep_wav:
+            try:
+                os.remove(wav_tmp)
+            except OSError:
+                pass
 
     print(f"{TAG} → apresentador pronto: {out_path} ({os.path.getsize(out_path)} bytes)", flush=True)
     return out_path
