@@ -267,6 +267,98 @@ def pick_reprise_item():
         return None
 
 
+def _build_reprise_payload(reprise):
+    """Monta o payload de news.ready a partir de um item do índice de reprises
+    (ver pick_reprise_item). Compartilhado pelo caminho de orçamento estourado
+    e pelo heartbeat de seca de notícia — mesma forma de saída nos dois."""
+    return {
+        "id": safe(reprise.get("id")),
+        "title": safe(reprise.get("title")),
+        "title_original": safe(reprise.get("title_original")),
+        "category": safe(reprise.get("category")),
+        "commentary": safe(reprise.get("commentary")),
+        "source": safe(reprise.get("source")),
+        "audio_file": safe(reprise.get("audio_file")),
+        "budget_exceeded": "false",
+        "reprise": "true",
+        "timestamp": time.time(),
+    }
+
+
+# --- Heartbeat de seca de notícia --------------------------------------------
+# O reprise por orçamento estourado (ver acima) só dispara dentro de
+# handle_event, que só roda quando chega um item em news.final. Quando a
+# própria notícia SECA (feed sem novidade, ou dedupe do collector suprimindo
+# tudo — ver ROADMAP "Dívida técnica"), handle_event nem roda, e o canal fica
+# preso no último bloco indefinidamente mesmo com orçamento disponível.
+# maybe_heartbeat_reprise() roda no loop principal (como maybe_reclaim_stuck),
+# INDEPENDENTE de mensagem chegando: se faz tempo demais desde o último
+# news.ready publicado, força uma reprise mesmo sem budget_exceeded.
+NEWS_DROUGHT_TIMEOUT_SEC = int(os.environ.get("NEWS_DROUGHT_TIMEOUT_SEC", "900"))  # 15min
+HEARTBEAT_SCAN_INTERVAL_SEC = int(os.environ.get("HEARTBEAT_SCAN_INTERVAL_SEC", "60"))
+LAST_READY_KEY = "synthesizer:last_ready_at"
+
+_last_heartbeat_scan = 0.0
+
+
+def _touch_last_ready():
+    """Marca 'agora' como a última vez que publicamos algo em news.ready
+    (fresh, skip-musetalk, reprise por orçamento ou reprise do heartbeat) —
+    reseta o relógio da seca. Best-effort."""
+    try:
+        r.set(LAST_READY_KEY, time.time(), ex=7 * 24 * 3600)
+    except Exception:
+        pass
+
+
+def _seconds_since_last_ready():
+    """None se nunca publicamos nada ainda (ou o Redis falhou) — nesse caso o
+    heartbeat não age, pra não disparar reprise antes do canal sequer começar."""
+    try:
+        v = r.get(LAST_READY_KEY)
+        return (time.time() - float(v)) if v else None
+    except Exception:
+        return None
+
+
+def heartbeat_reprise():
+    gap = _seconds_since_last_ready()
+    if gap is None or gap < NEWS_DROUGHT_TIMEOUT_SEC:
+        return
+    reprise = pick_reprise_item()
+    if not reprise:
+        print(
+            f"{TAG} → heartbeat: seca de {gap:.0f}s (> {NEWS_DROUGHT_TIMEOUT_SEC}s) mas "
+            f"nenhuma notícia paga hoje ainda pra reprisar; aguardando.",
+            flush=True,
+        )
+        return
+    out = _build_reprise_payload(reprise)
+    r.xadd(OUTPUT_STREAM, out)
+    bump_metric("heartbeat:reprise")
+    _touch_last_ready()
+    print(
+        f"{TAG} → heartbeat: seca de {gap:.0f}s (> {NEWS_DROUGHT_TIMEOUT_SEC}s) sem "
+        f"news.final → forçando reprise pra não travar o canal: "
+        f"{out['id']} ({out['title']})",
+        flush=True,
+    )
+    print(f"{TAG} → news.ready:", json.dumps(out, ensure_ascii=False))
+
+
+def maybe_heartbeat_reprise():
+    """Roda heartbeat_reprise() no máximo uma vez a cada HEARTBEAT_SCAN_INTERVAL_SEC."""
+    global _last_heartbeat_scan
+    now = time.monotonic()
+    if now - _last_heartbeat_scan < HEARTBEAT_SCAN_INTERVAL_SEC:
+        return
+    _last_heartbeat_scan = now
+    try:
+        heartbeat_reprise()
+    except Exception as e:
+        print(f"{TAG} → ERRO no heartbeat de seca de notícia: {e}", flush=True)
+
+
 def synthesize_audio(text, news_id, is_promo=False):
     """
     Gera o áudio real da notícia via ElevenLabs TTS.
@@ -421,6 +513,7 @@ def handle_event(event_id, data):
         r.xadd(OUTPUT_STREAM, out)
         r.xack(INPUT_STREAM, GROUP, event_id)
         bump_metric("elevenlabs:skipped:musetalk")
+        _touch_last_ready()
         print(
             f"{TAG} → SKIP ElevenLabs ({news_id}): bloco vai pelo MuseTalk/Chatterbox. "
             f"news.ready:",
@@ -465,21 +558,11 @@ def handle_event(event_id, data):
     if budget_exceeded:
         reprise = pick_reprise_item()
         if reprise:
-            out = {
-                "id": safe(reprise.get("id")),
-                "title": safe(reprise.get("title")),
-                "title_original": safe(reprise.get("title_original")),
-                "category": safe(reprise.get("category")),
-                "commentary": safe(reprise.get("commentary")),
-                "source": safe(reprise.get("source")),
-                "audio_file": safe(reprise.get("audio_file")),
-                "budget_exceeded": "false",
-                "reprise": "true",
-                "timestamp": time.time(),
-            }
+            out = _build_reprise_payload(reprise)
             r.xadd(OUTPUT_STREAM, out)
             r.xack(INPUT_STREAM, GROUP, event_id)
             bump_metric("reprise")
+            _touch_last_ready()
             print(
                 f"{TAG} → Orçamento esgotado, reprisando notícia já paga: "
                 f"{out['id']} ({out['title']})",
@@ -508,6 +591,7 @@ def handle_event(event_id, data):
     r.xadd(OUTPUT_STREAM, out)
     # Só confirma depois do áudio gravado em disco e do XADD de saída.
     r.xack(INPUT_STREAM, GROUP, event_id)
+    _touch_last_ready()
     print(f"{TAG} → news.ready:", json.dumps(out, ensure_ascii=False))
 
     # Notícia real com áudio pago (gerado agora ou cache HIT): entra no índice
@@ -592,10 +676,16 @@ def main():
         f"scan={STUCK_SCAN_INTERVAL_SEC}s).",
         flush=True,
     )
+    print(
+        f"{TAG} → heartbeat de seca de notícia ativo "
+        f"(timeout={NEWS_DROUGHT_TIMEOUT_SEC}s, scan={HEARTBEAT_SCAN_INTERVAL_SEC}s).",
+        flush=True,
+    )
 
     while True:
         try:
             maybe_reclaim_stuck()
+            maybe_heartbeat_reprise()
 
             msgs = r.xreadgroup(GROUP, CONSUMER, {INPUT_STREAM: ">"}, count=10, block=5000)
             if not msgs:

@@ -21,11 +21,19 @@ TAG = "Collector"
 # no futuro, para dar crédito visual à fonte na tela. O `link`/URL real da
 # matéria continua em `link`.
 #
-# Dedup: continua sendo só em memória (`seen_ids`), por id. O id é derivado do
-# link/URL da matéria, que é único por fonte, então o mesmo item da MESMA fonte
-# não é republicado dentro do processo. Dedup semântico entre fontes diferentes
-# (mesma notícia, títulos diferentes) NÃO é tratado aqui — fica para uma fase
-# futura.
+# Dedup: persistente no Redis com TTL (ver _already_seen/_mark_seen), por id.
+# O id é derivado do link/URL da matéria, que é único por fonte, então o mesmo
+# item da MESMA fonte não é republicado enquanto a chave não expirar. Dedup
+# semântico entre fontes diferentes (mesma notícia, títulos diferentes) NÃO é
+# tratado aqui — fica para uma fase futura.
+#
+# Por que Redis e não em memória (era assim até 2026-09-10): dedupe em memória
+# não sobrevive a restart do collector — todo restart re-flodava o feed inteiro
+# em news.raw (diagnosticado quando um dedupe de 8 dias acumulado suprimia 63
+# itens ainda presentes no feed, "0 novos" por >1h mesmo com conteúdo real
+# disponível; restart destravou, mas re-processou tudo de uma vez). Com TTL no
+# Redis: sobrevive a restart (sem reflood) e deixa o item voltar a circular
+# depois que expira, então um feed lento não starva o canal pra sempre.
 
 # --- BBC: RSS (mesma fonte já validada, só mais categorias) ---
 # URLs oficiais dos feeds do BBC News (feeds.bbci.co.uk). Sobrescrevível via
@@ -93,8 +101,30 @@ AGENCIABRASIL_FEED_URLS = [
 
 POLL_INTERVAL_SEC = int(os.environ.get("POLL_INTERVAL_SEC", "60"))
 
+# Dedupe persistente (ver comentário acima). 48h cobre folgado o ciclo de
+# publicação dos feeds monitorados sem deixar a chave acumular pra sempre.
+SEEN_TTL_SEC = int(os.environ.get("COLLECTOR_SEEN_TTL_SEC", str(48 * 3600)))
+SEEN_KEY_PREFIX = "collector:seen:"
+
 _TAG_RE = re.compile(r"<[^>]+>")
 _WS_RE = re.compile(r"\s+")
+
+
+def _already_seen(item_id):
+    """Falha de Redis => trata como NÃO visto (prefere republicar em duplicata
+    a travar o coletor)."""
+    try:
+        return bool(r.exists(SEEN_KEY_PREFIX + item_id))
+    except Exception as e:
+        print(f"{TAG} → AVISO: falha ao checar dedupe de {item_id} ({e}); tratando como novo.", flush=True)
+        return False
+
+
+def _mark_seen(item_id):
+    try:
+        r.set(SEEN_KEY_PREFIX + item_id, "1", ex=SEEN_TTL_SEC)
+    except Exception as e:
+        print(f"{TAG} → AVISO: falha ao marcar {item_id} como visto ({e}).", flush=True)
 
 
 def _uid(seed):
@@ -278,14 +308,14 @@ def main():
         flush=True,
     )
 
-    seen_ids = set()
+    print(f"{TAG} → dedupe persistente no Redis (TTL={SEEN_TTL_SEC // 3600}h).", flush=True)
 
     while True:
         try:
             news_items = collect_all()
             novos = 0
             for item in news_items:
-                if item["id"] in seen_ids:
+                if _already_seen(item["id"]):
                     continue
 
                 msg = {
@@ -301,10 +331,10 @@ def main():
                 r.xadd("news.raw", msg)
                 print("Collector → news.raw:", json.dumps(msg, ensure_ascii=False))
 
-                seen_ids.add(item["id"])
+                _mark_seen(item["id"])
                 novos += 1
 
-            print(f"{TAG} → ciclo: {novos} novos, {len(seen_ids)} vistos no total", flush=True)
+            print(f"{TAG} → ciclo: {novos} novos, {len(news_items)} nesta varredura", flush=True)
             time.sleep(POLL_INTERVAL_SEC)
 
         except Exception as e:

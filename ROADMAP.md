@@ -229,12 +229,37 @@ prep de 2–4 min. Bloqueia qualquer grade com mais de um apresentador.
 
 ## Dívida técnica
 
-**Sem heartbeat para seca de notícia** (diagnosticado 2026-09-10) — a pipeline
-trava no último bloco indefinidamente quando o feed para de produzir, mesmo com
-orçamento disponível. O reprise só cobre **orçamento estourado**
-(`budget_exceeded=True` dispara `pick_reprise_item()` dentro de `handle_event`,
-que só roda quando chega um item em `news.final`); quando a própria notícia seca,
-`handle_event` nem roda. Visto na madrugada de 2026-09-10: último `news.final`
-00:52 UTC, `collector` em "0 novos" por >1 h, `final.mp4` parado, índice de
-reprise saudável (1 item hoje) mas nunca consultado. Precisa de: **timeout desde
-o último `news.final` → forçar reprise mesmo sem `budget_exceeded`**.
+**[RESOLVIDO 2026-09-10] Sem heartbeat para seca de notícia** (diagnosticado
+2026-09-10 de manhã) — a pipeline travava no último bloco indefinidamente
+quando o feed parava de produzir, mesmo com orçamento disponível. O reprise só
+cobria **orçamento estourado** (`budget_exceeded=True` dispara
+`pick_reprise_item()` dentro de `handle_event`, que só roda quando chega um
+item em `news.final`); quando a própria notícia secava, `handle_event` nem
+rodava. Visto na madrugada de 2026-09-10: último `news.final` 00:52 UTC,
+`collector` em "0 novos" por >1 h, `final.mp4` parado, índice de reprise
+saudável (1 item hoje) mas nunca consultado.
+
+*Fix:* `synthesizer/main.py` — `maybe_heartbeat_reprise()` no loop principal
+(como `maybe_reclaim_stuck`), independente de mensagem chegando. Se
+`NEWS_DROUGHT_TIMEOUT_SEC` (900s default) desde o último `news.ready`
+publicado, força reprise via `pick_reprise_item()` mesmo sem
+`budget_exceeded`. `_touch_last_ready()` marca o relógio em todo publish
+(skip-musetalk, reprise por orçamento, fresh, heartbeat). Testado: gap
+simulado de 1000s → disparou, publicou, bump_metric, resetou o relógio.
+
+**[RESOLVIDO 2026-09-10] Dedupe do `collector` em memória, sem persistência**
+(diagnosticado 2026-09-10, tarde) — o `collector` guardava os IDs já vistos só
+em RAM. Com uptime longo (8 dias no caso), acumulava centenas de IDs e parava
+de re-emitir itens que ainda estavam no feed → `news.raw` secava mesmo com ~63
+itens reais disponíveis ("0 novos, 392 vistos"). Restart zerava a lista e
+re-flodava os 63 de uma vez (churn downstream, mas quase tudo cache-hit).
+
+*Fix:* `collector/main.py` — dedupe trocado de `set()` em memória pra chave
+Redis por item (`collector:seen:<id>`, TTL 48h via `COLLECTOR_SEEN_TTL_SEC`).
+Sobrevive a restart (sem reflood) e deixa o item voltar a circular depois de
+expirar (feed lento não starva o canal permanentemente). Testado: 2 restarts
+seguidos do collector — 1º "64 novos" (populando Redis), 2º **"0 novos"** (sem
+reflood), TTL confirmado ≈48h.
+
+Junto, os dois eliminam a classe "canal congela em silêncio" — liberado
+retentar o turno MuseTalk on-air.
