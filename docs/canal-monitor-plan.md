@@ -170,5 +170,9 @@ global: se o watchdog fez > `WD_MAX_ACTIONS_1H` (def. 10) ações numa hora, ele
   Mitigação: sem portas (só saída), whitelist fixa de ações, sem `eval`/shell
   dinâmico, tudo auditado.
 - `CANAL_OPS_SHARED_SECRET` é a credencial que protege a fila de comandos. Se
-  vazar, um atacante consegue enfileirar `restart_*`/`inject_breaking` (não
-  consegue rodar comando arbitrário — a whitelist é fixa no agente).
+  vazar, um atacante consegue enfileirar `restart_*`/`inject_breaking`/
+  `set_anchor` (não consegue rodar comando arbitrário — a whitelist é fixa no
+  agente). `set_anchor` (extensão pós-Fase 4, fora deste plano original) troca
+  a âncora/voz do canal ao vivo sem restart nem custo — e, diferente das
+  outras 3 actions, hoje **não tem rate-limit próprio** no `ops-agent`
+  (diagnosticado 2026-09-11; fix desenhado, aguardando aplicação).

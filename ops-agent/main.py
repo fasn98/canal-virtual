@@ -104,6 +104,7 @@ RESTART_STREAM_MAX_PER_HOUR = int(os.environ.get("OPS_AGENT_RESTART_STREAM_MAX_P
 RESTART_STREAM_MIN_GAP_SEC = int(os.environ.get("OPS_AGENT_RESTART_STREAM_MIN_GAP_SEC", "60"))
 RESTART_SERVICE_MAX_PER_HOUR = int(os.environ.get("OPS_AGENT_RESTART_SERVICE_MAX_PER_HOUR", "4"))
 INJECT_BREAKING_MAX_PER_HOUR = int(os.environ.get("OPS_AGENT_INJECT_BREAKING_MAX_PER_HOUR", "6"))
+SET_ANCHOR_MAX_PER_HOUR = int(os.environ.get("OPS_AGENT_SET_ANCHOR_MAX_PER_HOUR", "12"))
 BREAKING_TITLE_MAX_CHARS = 180
 BREAKING_SUMMARY_MAX_CHARS = 600
 # "avatar:provider_override" no Redis — mesma chave lida por renderer/main.py
@@ -465,6 +466,8 @@ def _action_set_anchor(params):
     """Extensão nossa (fora do plano de 01/09): troca instantânea entre as 2
     âncoras atuais via Redis, lida por renderer/main.py e synthesizer/main.py
     (_active_avatar_provider). Sem restart, sem custo."""
+    if _rate_limited("set_anchor", SET_ANCHOR_MAX_PER_HOUR):
+        return False, f"recusado: set_anchor já bateu {SET_ANCHOR_MAX_PER_HOUR}/h"
     mode = str((params or {}).get("mode", "")).strip().lower()
     if mode not in ANCHOR_MODE_TO_PROVIDER:
         return False, f"recusado: mode {mode!r} inválido (feminina|fabio|auto)"
