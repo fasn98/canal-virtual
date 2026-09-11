@@ -394,6 +394,12 @@ def handle_event(event_id, data):
     summary = safe(data.get("summary", ""))
     # Rótulo da fonte ("BBC"/"Guardian"), vindo do collector via classifier.
     source = safe(data.get("source", ""))
+    # "breaking" = injetado via inject_breaking (ops-agent/painel /canal) com
+    # manchete real que você já sabe, além dos feeds. Fast-track: pula os 3
+    # revisores mesmo com ENABLE_EDITORIAL_REVIEW=true — a urgência importa
+    # mais que a segunda opinião editorial aqui. Ver docs/canal-monitor-plan.md.
+    priority = safe(data.get("priority", ""))
+    is_breaking = priority.strip().lower() == "breaking"
 
     # Cache por id: guarda apenas o comentário JÁ APROVADO. Um HIT pula tanto
     # a geração quanto a revisão — uma notícia aprovada não é revista de novo.
@@ -404,7 +410,7 @@ def handle_event(event_id, data):
             flush=True,
         )
         bump_metric("cache:commentary:hit")
-    elif REVIEW_ENABLED:
+    elif REVIEW_ENABLED and not is_breaking:
         bump_metric("cache:commentary:miss")
         commentary = produce_approved_commentary(
             news_id, title, title_original, summary, category, source
@@ -422,8 +428,11 @@ def handle_event(event_id, data):
             return
         save_cached_commentary(news_id, commentary)
     else:
-        # Revisão desligada (ENABLE_EDITORIAL_REVIEW=false): comportamento
-        # antigo — publica direto, cacheia só o que veio da API.
+        # Revisão desligada (ENABLE_EDITORIAL_REVIEW=false) OU item breaking
+        # (fast-track): publica direto, cacheia só o que veio da API.
+        if is_breaking:
+            bump_metric("commentator:breaking:fasttrack")
+            print(f"{TAG} → BREAKING {news_id!r}: fast-track (sem revisão editorial).", flush=True)
         bump_metric("cache:commentary:miss")
         commentary, from_api = generate_commentary(title, summary, category)
         if from_api:
@@ -436,6 +445,7 @@ def handle_event(event_id, data):
         "category": category,
         "commentary": commentary,
         "source": source,
+        "priority": priority,
         "timestamp": safe(time.time()),
     }
 

@@ -51,6 +51,32 @@ MUSETALK_ALLOW_ON_AIR = os.environ.get("MUSETALK_ALLOW_ON_AIR", "false").strip()
     "1", "true", "yes", "on",
 )
 
+# --- Troca de âncora ao vivo (painel /canal) ------------------------------
+# AVATAR_PROVIDER acima é o padrão de deploy. O painel de controle grava
+# "avatar:provider_override" no Redis ("d-id"/"musetalk") pra trocar de
+# âncora SEM restart — mesmo padrão de precedência Redis>env já usado pro pod
+# GPU (_runpod_pod_id em lib/gpu_client.py). MUSETALK_ALLOW_ON_AIR continua
+# sendo o freio mestre: com ele false, o override nunca põe musetalk no ar
+# em produção (só em item de teste). Cache curto pra não bater Redis toda
+# mensagem.
+_AVATAR_OVERRIDE_KEY = "avatar:provider_override"
+_avatar_override_cache = {"ts": 0.0, "val": None}
+_AVATAR_OVERRIDE_TTL_SEC = 5
+
+
+def _active_avatar_provider():
+    now = time.monotonic()
+    if now - _avatar_override_cache["ts"] >= _AVATAR_OVERRIDE_TTL_SEC:
+        val = None
+        try:
+            v = r.get(_AVATAR_OVERRIDE_KEY)
+            if v and v.strip().lower() in ("d-id", "musetalk"):
+                val = v.strip().lower()
+        except Exception:
+            val = None
+        _avatar_override_cache.update(ts=now, val=val)
+    return _avatar_override_cache["val"] or AVATAR_PROVIDER
+
 # --- Chroma key do vídeo de lip-sync (D-ID) ---
 # O mp4 que volta do D-ID tem o fundo verde de assets/avatar_greenscreen.png
 # (mp4 não tem transparência real). Antes do overlay, o renderer remove esse
@@ -478,13 +504,14 @@ def handle_event(event_id, data):
     # Itens de teste (não vão ao ar) usam o musetalk de qualquer jeito — é o
     # que o `test_musetalk` exercita. Qualquer falha (pod, QA de áudio
     # reprovada, ffmpeg) cai no caminho D-ID (ver _render_musetalk_block).
-    if AVATAR_PROVIDER == "musetalk" and (not on_air or MUSETALK_ALLOW_ON_AIR):
+    active_provider = _active_avatar_provider()
+    if active_provider == "musetalk" and (not on_air or MUSETALK_ALLOW_ON_AIR):
         _render_musetalk_block(
             event_id, news_id, title, title_original, category, text, data,
             test_item, on_air, target_final, target_temp,
         )
         return
-    if AVATAR_PROVIDER == "musetalk":
+    if active_provider == "musetalk":
         print(
             f"{TAG} → AVATAR_PROVIDER=musetalk mas MUSETALK_ALLOW_ON_AIR=false "
             f"→ item {news_id} vai ao ar pelo caminho D-ID/estático.",

@@ -109,6 +109,10 @@ def handle_event(event_id, data):
         "published": data.get("published", ""),
         "source": source,
         "timestamp": time.time(),
+        # Propaga a prioridade (ex.: "breaking", vinda do inject_breaking do
+        # ops-agent) adiante — commentator faz fast-track e synthesizer pula
+        # o freio de orçamento pra itens breaking. Ver docs/canal-monitor-plan.md.
+        "priority": data.get("priority", ""),
     }
 
     r.xadd(OUTPUT_STREAM, msg)

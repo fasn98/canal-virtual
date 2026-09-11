@@ -145,6 +145,28 @@ ALLOW_TEST_ON_AIR = os.environ.get("ALLOW_TEST_ON_AIR", "false").strip().lower()
 )
 GPU_SERVER_URL = os.environ.get("GPU_SERVER_URL", "").strip().rstrip("/")
 
+# --- Troca de âncora ao vivo (painel /canal) ------------------------------
+# Espelha renderer/main.py: mesma chave Redis, mesma precedência sobre o env.
+# Ver comentário lá para o raciocínio completo.
+_AVATAR_OVERRIDE_KEY = "avatar:provider_override"
+_avatar_override_cache = {"ts": 0.0, "val": None}
+_AVATAR_OVERRIDE_TTL_SEC = 5
+
+
+def _active_avatar_provider():
+    now = time.monotonic()
+    if now - _avatar_override_cache["ts"] >= _AVATAR_OVERRIDE_TTL_SEC:
+        val = None
+        try:
+            v = r.get(_AVATAR_OVERRIDE_KEY)
+            if v and v.strip().lower() in ("d-id", "musetalk"):
+                val = v.strip().lower()
+        except Exception:
+            val = None
+        _avatar_override_cache.update(ts=now, val=val)
+    return _avatar_override_cache["val"] or AVATAR_PROVIDER
+
+
 _pod_ready_cache = {"ts": 0.0, "ok": False}
 _POD_READY_TTL_SEC = 20
 
@@ -174,7 +196,7 @@ def musetalk_will_handle(news_id, title):
     synthesizer tem que ser conservador — se pular a ElevenLabs e o MuseTalk
     não rodar, o fallback fica sem áudio fresco; o renderer pode ser
     incondicional porque tem o fallback D-ID."""
-    if AVATAR_PROVIDER != "musetalk":
+    if _active_avatar_provider() != "musetalk":
         return False
     testish = is_test_id(news_id, title)
     routes_to_musetalk = (testish and not ALLOW_TEST_ON_AIR) or MUSETALK_ALLOW_ON_AIR
@@ -488,6 +510,12 @@ def handle_event(event_id, data):
     commentary = safe(data.get("commentary"))
     category = safe(data.get("category"))
     is_promo = category.strip().lower() in ("promoção", "promocao", "promo")
+    # "breaking" (inject_breaking, painel /canal) fura o freio de orçamento
+    # diário — a mesma isenção que já vale pra blocos promocionais. Ver
+    # docs/canal-monitor-plan.md Fase 4.
+    priority = safe(data.get("priority", ""))
+    is_breaking = priority.strip().lower() == "breaking"
+    exempt_from_budget = is_promo or is_breaking
 
     # --- Skip da ElevenLabs quando o bloco vai pelo MuseTalk (Chatterbox
     # on-pod): o mp3 fresh seria descartado. Publica news.ready com um áudio de
@@ -505,6 +533,7 @@ def handle_event(event_id, data):
             "category": category,
             "commentary": commentary,
             "source": safe(data.get("source")),
+            "priority": priority,
             "audio_file": safe(fb.get("audio_file")),  # "" se ainda não há item pago hoje
             "budget_exceeded": "false",
             "tts_engine": "chatterbox",
@@ -525,7 +554,7 @@ def handle_event(event_id, data):
     # Gera o áudio (grava em disco antes de retornar o caminho). budget_exceeded
     # = True quando o freio de gasto diário barrou a chamada; nesse caso o
     # renderer pula o item e mantém o último bloco bom no ar.
-    audio_file, budget_exceeded = synthesize_audio(commentary, news_id, is_promo=is_promo)
+    audio_file, budget_exceeded = synthesize_audio(commentary, news_id, is_promo=exempt_from_budget)
 
     # --- Falha de síntese (ElevenLabs indisponível / sem crédito / quota_exceeded
     # / chave inválida / erro de rede / texto vazio): NÃO publica a notícia em
@@ -583,6 +612,7 @@ def handle_event(event_id, data):
         "category": category,
         "commentary": commentary,
         "source": safe(data.get("source")),
+        "priority": priority,
         "audio_file": safe(audio_file),
         "budget_exceeded": "true" if budget_exceeded else "false",
         "timestamp": time.time(),

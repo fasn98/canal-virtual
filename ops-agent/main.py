@@ -16,6 +16,7 @@ Ver docs/canal-monitor-plan.md.
 """
 
 import datetime
+import hashlib
 import os
 import time
 import traceback
@@ -81,6 +82,37 @@ EXPECTED_CONTAINERS = [
     ).split(",")
     if c.strip()
 ]
+
+# --- Fase 2/4 — execução de comandos (docs/canal-monitor-plan.md) -----------
+# Long-poll de comandos: cada tick do loop principal espera até esse tempo por
+# 1 comando antes de mandar o heartbeat. Mantém o heartbeat em ~cadência de
+# COMMANDS_POLL_TIMEOUT_SEC (bem próximo do REPORT_INTERVAL_SEC de antes).
+COMMANDS_POLL_TIMEOUT_SEC = int(os.environ.get("OPS_AGENT_COMMANDS_POLL_TIMEOUT_SEC", "20"))
+AGENT_ENABLED = os.environ.get("OPS_AGENT_EXECUTE_COMMANDS", "true").strip().lower() in (
+    "1", "true", "yes", "on",
+)
+
+RESTART_WHITELIST = [
+    c.strip()
+    for c in os.environ.get(
+        "OPS_AGENT_RESTART_WHITELIST",
+        "renderer,synthesizer,commentator,classifier,collector,promoter",
+    ).split(",")
+    if c.strip()
+]
+RESTART_STREAM_MAX_PER_HOUR = int(os.environ.get("OPS_AGENT_RESTART_STREAM_MAX_PER_HOUR", "4"))
+RESTART_STREAM_MIN_GAP_SEC = int(os.environ.get("OPS_AGENT_RESTART_STREAM_MIN_GAP_SEC", "60"))
+RESTART_SERVICE_MAX_PER_HOUR = int(os.environ.get("OPS_AGENT_RESTART_SERVICE_MAX_PER_HOUR", "4"))
+INJECT_BREAKING_MAX_PER_HOUR = int(os.environ.get("OPS_AGENT_INJECT_BREAKING_MAX_PER_HOUR", "6"))
+BREAKING_TITLE_MAX_CHARS = 180
+BREAKING_SUMMARY_MAX_CHARS = 600
+# "avatar:provider_override" no Redis — mesma chave lida por renderer/main.py
+# e synthesizer/main.py (_active_avatar_provider). Extensão nossa ao plano
+# original (não estava no doc de 01/09): troca instantânea das 2 âncoras
+# atuais, sem restart. "auto" remove o override (volta pro AVATAR_PROVIDER
+# do .env).
+AVATAR_OVERRIDE_KEY = "avatar:provider_override"
+ANCHOR_MODE_TO_PROVIDER = {"feminina": "d-id", "fabio": "musetalk", "auto": None}
 
 # stream -> consumer group (para medir backlog de consumidor preso).
 STREAM_GROUPS = {
@@ -353,16 +385,162 @@ def post_report(snapshot, command_result=None):
     )
 
 
+# --- Execução de comandos (whitelist FIXA, Fase 2/4) ------------------------
+# Janelas em memória (zeram em restart do ops-agent — mesma limitação aceita
+# pra `_restart_history`; auditoria de verdade fica no `canal_audit` do lado
+# Replit, que sobrevive a restart daqui).
+_action_history = {}  # chave da ação (ex.: "restart_stream", "restart:renderer") -> [timestamps]
+
+
+def _rate_limited(key, max_per_hour, min_gap_sec=0):
+    """True = BARRADO (excedeu o limite ou não passou o intervalo mínimo).
+    Só registra o timestamp quando NÃO barrado (chamador só age se liberado)."""
+    hist = _action_history.setdefault(key, [])
+    now = time.time()
+    cutoff = now - 3600
+    while hist and hist[0] < cutoff:
+        hist.pop(0)
+    if hist and min_gap_sec and (now - hist[-1]) < min_gap_sec:
+        return True
+    if len(hist) >= max_per_hour:
+        return True
+    hist.append(now)
+    return False
+
+
+def _breaking_id(title):
+    seed = f"breaking:{title}:{time.time()}"
+    return hashlib.sha256(seed.encode("utf-8")).hexdigest()[:16]
+
+
+def _action_restart_stream(_params):
+    if _rate_limited("restart_stream", RESTART_STREAM_MAX_PER_HOUR, RESTART_STREAM_MIN_GAP_SEC):
+        return False, (
+            f"recusado: < {RESTART_STREAM_MIN_GAP_SEC}s do último restart_stream "
+            f"ou já bateu {RESTART_STREAM_MAX_PER_HOUR}/h"
+        )
+    docker_client().containers.get("streamer").restart(timeout=20)
+    return True, "streamer reiniciado"
+
+
+def _action_restart_service(params):
+    name = str((params or {}).get("name", "")).strip()
+    if name not in RESTART_WHITELIST:
+        return False, f"recusado: {name!r} não está na whitelist {RESTART_WHITELIST}"
+    if _rate_limited(f"restart:{name}", RESTART_SERVICE_MAX_PER_HOUR):
+        return False, f"recusado: {name} já bateu {RESTART_SERVICE_MAX_PER_HOUR}/h"
+    docker_client().containers.get(name).restart(timeout=20)
+    return True, f"{name} reiniciado"
+
+
+def _action_inject_breaking(params):
+    title = str((params or {}).get("title", "")).strip()
+    summary = str((params or {}).get("summary", "")).strip()
+    if not title:
+        return False, "recusado: title vazio"
+    if len(title) > BREAKING_TITLE_MAX_CHARS:
+        return False, f"recusado: title > {BREAKING_TITLE_MAX_CHARS} chars"
+    if len(summary) > BREAKING_SUMMARY_MAX_CHARS:
+        return False, f"recusado: summary > {BREAKING_SUMMARY_MAX_CHARS} chars"
+    if _rate_limited("inject_breaking", INJECT_BREAKING_MAX_PER_HOUR):
+        return False, f"recusado: já bateu {INJECT_BREAKING_MAX_PER_HOUR}/h"
+    item_id = _breaking_id(title)
+    item = {
+        "id": item_id,
+        "title": title,
+        "summary": summary,
+        "link": "",
+        "published": iso(now_utc()),
+        "source": "Redação",
+        "priority": "breaking",
+        "injected_by": (params or {}).get("requested_by", "painel"),
+        "injected_at": iso(now_utc()),
+    }
+    r.xadd("news.raw", item)
+    log(f"inject_breaking: {item_id} {title!r}")
+    return True, f"publicado em news.raw ({item_id}) — fast-track no commentator"
+
+
+def _action_set_anchor(params):
+    """Extensão nossa (fora do plano de 01/09): troca instantânea entre as 2
+    âncoras atuais via Redis, lida por renderer/main.py e synthesizer/main.py
+    (_active_avatar_provider). Sem restart, sem custo."""
+    mode = str((params or {}).get("mode", "")).strip().lower()
+    if mode not in ANCHOR_MODE_TO_PROVIDER:
+        return False, f"recusado: mode {mode!r} inválido (feminina|fabio|auto)"
+    provider = ANCHOR_MODE_TO_PROVIDER[mode]
+    if provider is None:
+        r.delete(AVATAR_OVERRIDE_KEY)
+        return True, "override removido — volta pro AVATAR_PROVIDER do .env"
+    r.set(AVATAR_OVERRIDE_KEY, provider)
+    return True, f"âncora ativa agora: {mode} ({provider})"
+
+
+ACTIONS = {
+    "restart_stream": _action_restart_stream,
+    "restart_service": _action_restart_service,
+    "inject_breaking": _action_inject_breaking,
+    "set_anchor": _action_set_anchor,
+}
+
+
+def execute_command(cmd):
+    """Executa 1 comando da whitelist fixa. Devolve o commandResult pro
+    /api/canal/agent/report. Qualquer ação fora de ACTIONS ou qualquer
+    exceção volta como ok=False — nunca propaga (o loop principal não pode
+    morrer por causa de 1 comando ruim)."""
+    cmd_id = cmd.get("id", "?")
+    action = cmd.get("action", "")
+    params = cmd.get("params") or {}
+    fn = ACTIONS.get(action)
+    if fn is None:
+        ok, detail = False, f"ação desconhecida: {action!r} (whitelist: {list(ACTIONS)})"
+    else:
+        try:
+            ok, detail = fn(params)
+        except Exception as e:
+            ok, detail = False, f"ERRO ao executar {action}: {type(e).__name__}: {e}"
+    log(f"comando {cmd_id} action={action!r} ok={ok} detail={detail!r}")
+    # "success" (não "ok") é o nome de campo que o backend Replit espera em
+    # commandResult — ver artifacts/api-server/src/routes/canal.ts.
+    return {"id": cmd_id, "success": ok, "detail": detail}
+
+
+def long_poll_next_command():
+    """GET /api/canal/agent/next-command — bloqueia no lado Replit até ~25s ou
+    até haver 1 comando. {"command": null} no timeout é normal, não é erro."""
+    resp = requests.get(
+        f"{APP_BASE_URL}/api/canal/agent/next-command",
+        headers={"X-Canal-Agent-Secret": OPS_SECRET},
+        timeout=COMMANDS_POLL_TIMEOUT_SEC + 10,
+        params={"timeout": COMMANDS_POLL_TIMEOUT_SEC},
+    )
+    resp.raise_for_status()
+    return (resp.json() or {}).get("command")
+
+
 def main():
     log(
         f"iniciando — app={APP_BASE_URL} metrics={METRICS_URL} "
-        f"intervalo={REPORT_INTERVAL_SEC}s (FASE 1: só relatório)"
+        f"executa_comandos={AGENT_ENABLED} poll={COMMANDS_POLL_TIMEOUT_SEC}s "
+        f"(FASE 2/4: comandos + inject_breaking + set_anchor)"
     )
     while True:
         t0 = time.time()
+        command_result = None
         try:
+            if AGENT_ENABLED:
+                try:
+                    cmd = long_poll_next_command()
+                except requests.RequestException as e:
+                    cmd = None
+                    log("long-poll de comandos falhou (segue pro heartbeat):", e)
+                if cmd:
+                    command_result = execute_command(cmd)
+
             snap = build_snapshot()
-            resp = post_report(snap)
+            snap["agent"] = {"phase": 4, "consumes_commands": AGENT_ENABLED}
+            resp = post_report(snap, command_result)
             if resp.status_code == 200:
                 st = snap["stream"]
                 pl = snap["pipeline"]["containers"]
@@ -378,7 +556,9 @@ def main():
             log("ciclo ERRO:", type(e).__name__, e)
             traceback.print_exc()
         elapsed = time.time() - t0
-        time.sleep(max(1.0, REPORT_INTERVAL_SEC - elapsed))
+        # Se o long-poll já consumiu o intervalo (caso comum: comandos/next
+        # bloqueia até COMMANDS_POLL_TIMEOUT_SEC), não dorme de novo.
+        time.sleep(max(0.0, min(REPORT_INTERVAL_SEC, COMMANDS_POLL_TIMEOUT_SEC) - elapsed))
 
 
 if __name__ == "__main__":
