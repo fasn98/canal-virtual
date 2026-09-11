@@ -263,3 +263,14 @@ reflood), TTL confirmado ≈48h.
 
 Junto, os dois eliminam a classe "canal congela em silêncio" — liberado
 retentar o turno MuseTalk on-air.
+
+**Reprise regenera áudio via Chatterbox durante o turno MuseTalk** (diagnosticado
+2026-09-10, via revisão de código — baixa prioridade). Reprise (orçamento ou
+heartbeat) durante turno MuseTalk regenera áudio via Chatterbox em vez de
+reusar o mp3 já pago da reprise — o roteamento em `renderer/main.py:481` não
+diferencia reprise de item fresco (`budget_exceeded` chega `"false"` nos dois
+casos — ver `_build_reprise_payload` — e o campo `reprise` só é lido dentro de
+`_render_did_block`, cosmético, não afeta rota). Se o `news_id` já tem mp4
+MuseTalk cacheado, é cache HIT e não gera nada novo; se não, gera fresco e
+ignora `data["audio_file"]`. Sem custo extra (mp3 já pago, créditos não mudam),
+só reuso não-ótimo — o custo real é pod-tempo de um render redundante.
