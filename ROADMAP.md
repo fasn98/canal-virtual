@@ -274,3 +274,25 @@ casos — ver `_build_reprise_payload` — e o campo `reprise` só é lido dentr
 MuseTalk cacheado, é cache HIT e não gera nada novo; se não, gera fresco e
 ignora `data["audio_file"]`. Sem custo extra (mp3 já pago, créditos não mudam),
 só reuso não-ótimo — o custo real é pod-tempo de um render redundante.
+
+**[RESOLVIDO 2026-09-11] Cache do promo preso no avatar pré-v3** — um novo
+mecanismo de troca de âncora ao vivo (`avatar:provider_override` no Redis,
+painel `/canal` externo, precedência sobre `.env AVATAR_PROVIDER` — ver
+`renderer/main.py`/`synthesizer/main.py`) apareceu no repo fora desta sessão e
+pôs `AVATAR_PROVIDER=musetalk`/`MUSETALK_ALLOW_ON_AIR=true` valendo pra
+produção de verdade. Isso expôs um bug antigo: `volumes/assets/musetalk/
+promo-futureverse-beyond-v3.mp4` (572×542, gerado 2026-09-05) nunca foi
+regenerado depois do idle virar v3 (1024×1024, 09-06/07) — eu mesmo tinha
+instruído preservá-lo como "asset fixo" ao limpar o cache na época (ver
+"Observações que viraram lição" #2), o que estava errado. Com a calibração
+atual (`SCALE=0.39`, `X=1080/Y=330`, tunada pro 1024×1024) aplicada sobre o
+clip antigo de 572×542, o avatar saía minúsculo e fora do lugar no promo —
+visto ao vivo, corrigido em regime de urgência: `avatar:provider_override=d-id`
+no Redis (revert imediato, sem restart) + apagado o cache stale (regenera
+sozinho na próxima vez que o promo for pelo MuseTalk).
+
+*Melhoria estrutural pendente (não implementada):* `get_presenter_video()`
+cacheia só por `news_id`, sem checar dimensão/versão do idle — não tem como
+saber que o idle mudou. Nomear os arquivos por `{avatar_id}/{news_id}.mp4` (ou
+embutir a dimensão/versão no path) eliminaria essa classe de bug sem depender
+de lembrar de limpar o cache manualmente a cada troca de idle.
